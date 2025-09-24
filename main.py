@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from gemini_webapi import GeminiClient, set_log_level
 from gemini_webapi.constants import Model
+from gemini_webapi.types import Gem
 from pydantic import BaseModel
 
 # Configure logging
@@ -117,6 +118,7 @@ class ChatCompletionRequest(BaseModel):
 	presence_penalty: Optional[float] = 0
 	frequency_penalty: Optional[float] = 0
 	user: Optional[str] = None
+	system_prompt: Optional[str] = None
 
 
 class Choice(BaseModel):
@@ -241,12 +243,14 @@ def map_model_name(openai_model_name: str) -> Model:
 def prepare_conversation(messages: List[Message]) -> tuple:
 	conversation = ""
 	temp_files = []
+	system_prompt = None
 
 	for msg in messages:
 		if isinstance(msg.content, str):
 			# String content handling
 			if msg.role == "system":
-				conversation += f"System: {msg.content}\n\n"
+				# Extract system prompt for gem creation
+				system_prompt = msg.content
 			elif msg.role == "user":
 				conversation += f"Human: {msg.content}\n\n"
 			elif msg.role == "assistant":
@@ -256,7 +260,10 @@ def prepare_conversation(messages: List[Message]) -> tuple:
 			if msg.role == "user":
 				conversation += "Human: "
 			elif msg.role == "system":
-				conversation += "System: "
+				# Extract system prompt from mixed content
+				for item in msg.content:
+					if item.type == "text":
+						system_prompt = item.text
 			elif msg.role == "assistant":
 				conversation += "Assistant: "
 
@@ -285,7 +292,28 @@ def prepare_conversation(messages: List[Message]) -> tuple:
 	# Add a final prompt for the assistant to respond to
 	conversation += "Assistant: "
 
-	return conversation, temp_files
+	return conversation, temp_files, system_prompt
+
+
+# Helper to create gem from system prompt
+async def create_gem_from_system_prompt(system_prompt: str, client: GeminiClient) -> Optional[Gem]:
+	"""从系统提示词创建临时 Gem"""
+	if not system_prompt:
+		return None
+
+	try:
+		# Create a temporary gem with a unique ID
+		gem_name = f"system-prompt-{uuid.uuid4().hex[:8]}"
+		gem = await client.create_gem(
+			name=gem_name,
+			prompt=system_prompt,
+			description="Temporary gem created from system prompt"
+		)
+		logger.info(f"Created temporary gem from system prompt: {gem.id}")
+		return gem
+	except Exception as e:
+		logger.error(f"Failed to create gem from system prompt: {str(e)}")
+		return None
 
 
 # Dependency to get the initialized Gemini client
@@ -311,23 +339,38 @@ async def create_chat_completion(request: ChatCompletionRequest, api_key: str = 
 			await gemini_client.init(timeout=300)
 			logger.info("Gemini client initialized successfully")
 
-		# 转换消息为对话格式
-		conversation, temp_files = prepare_conversation(request.messages)
+		# 使用当前请求的消息
+		messages_to_use = request.messages
+
+		# 转换消息为对话格式，提取系统提示词
+		conversation, temp_files, system_prompt = prepare_conversation(messages_to_use)
 		logger.info(f"Prepared conversation: {conversation}")
 		logger.info(f"Temp files: {temp_files}")
+		logger.info(f"System prompt from messages: {system_prompt}")
+
+		# 使用请求中的 system_prompt 字段（优先级高于消息中的系统提示词）
+		final_system_prompt = request.system_prompt if request.system_prompt else system_prompt
+		logger.info(f"Final system prompt: {final_system_prompt}")
 
 		# 获取适当的模型
 		model = map_model_name(request.model)
 		logger.info(f"Using model: {model}")
 
+		# 如果有系统提示词，创建临时 Gem
+		gem_obj = None
+		if final_system_prompt:
+			gem_obj = await create_gem_from_system_prompt(final_system_prompt, gemini_client)
+			if gem_obj:
+				logger.info(f"Created gem from system prompt: {gem_obj.id}")
+
 		# 生成响应
 		logger.info("Sending request to Gemini...")
 		if temp_files:
 			# With files
-			response = await gemini_client.generate_content(conversation, files=temp_files, model=model)
+			response = await gemini_client.generate_content(conversation, files=temp_files, model=model, gem=gem_obj)
 		else:
 			# Text only
-			response = await gemini_client.generate_content(conversation, model=model)
+			response = await gemini_client.generate_content(conversation, model=model, gem=gem_obj)
 
 		# 清理临时文件
 		for temp_file in temp_files:
