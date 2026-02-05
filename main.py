@@ -229,9 +229,10 @@ async def proxy_image(url: str, sig: str):
 
 	headers = {
 		"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 Edg/144.0.0.0",
-		"Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+		"Accept": "*/*",
 		"Accept-Language": "en-US,en;q=0.9",
 		"Referer": "https://gemini.google.com/",
+		"Origin": "https://gemini.google.com",
 		"preferanonymous": "1",
 		"cache-control": "no-cache",
 		"pragma": "no-cache",
@@ -247,19 +248,43 @@ async def proxy_image(url: str, sig: str):
 		"sec-ch-ua-platform": '"Windows"',
 		"sec-ch-ua-platform-version": '"19.0.0"',
 		"sec-ch-ua-wow64": "?0",
-		"sec-fetch-dest": "image",
-		"sec-fetch-mode": "no-cors",
+		"sec-fetch-dest": "empty",
+		"sec-fetch-mode": "cors",
 		"sec-fetch-site": "cross-site",
 		"sec-fetch-storage-access": "none",
 	}
 
 	# IMPORTANT: Use a clean AsyncClient WITHOUT the Gemini session cookies.
-	# Enabling http2=True to match the official web app's request behavior.
+	# We handle redirects manually to ensure ALL custom headers are preserved across domain hops.
 	async with httpx.AsyncClient(http2=True) as client:
 		try:
-			resp = await client.get(url, follow_redirects=True, timeout=15.0, headers=headers)
+			current_url = url
+			max_redirects = 10
+			redirect_count = 0
+			
+			while redirect_count < max_redirects:
+				resp = await client.get(current_url, follow_redirects=False, timeout=15.0, headers=headers)
+				
+				if resp.status_code in (301, 302, 303, 307, 308):
+					location = resp.headers.get("location")
+					if not location:
+						break
+					
+					# Handle relative redirects
+					if not location.startswith("http"):
+						from urllib.parse import urljoin
+						location = urljoin(current_url, location)
+					
+					logger.info(f"Redirecting to: {location} (Hops: {redirect_count + 1})")
+					current_url = location
+					redirect_count += 1
+					continue
+				
+				# Not a redirect, break the loop
+				break
+				
 			if resp.status_code != 200:
-				logger.error(f"Google returned {resp.status_code} for image: {url}")
+				logger.error(f"Google returned {resp.status_code} for image at {current_url} (Initial: {url})")
 				logger.debug(f"Response headers: {resp.headers}")
 			
 			resp.raise_for_status()
