@@ -343,6 +343,13 @@ async def create_chat_completion(request: ChatCompletionRequest, api_key: str = 
 			reply_text += f"<think>{response.thoughts}</think>"
 		if hasattr(response, "text"):
 			reply_text += response.text
+		# 提取并追加图片响应
+		if hasattr(response, "images") and response.images:
+			for img in response.images:
+				# 检查对象是否有 url 属性 (GeneratedImage 或 WebImage)
+				img_url = getattr(img, "url", None)
+				if img_url:
+					reply_text += f"\n\n![image]({img_url})"
 		else:
 			reply_text += str(response)
 		reply_text = reply_text.replace("&lt;", "<").replace("\\<", "<").replace("\\_", "_").replace("\\>", ">")
