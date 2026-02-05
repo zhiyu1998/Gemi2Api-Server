@@ -201,10 +201,11 @@ async def get_gemini_client():
 
 
 @app.get("/gemini-proxy/image")
-async def proxy_image(url: str, sig: str, gemini: GeminiClient = Depends(get_gemini_client)):
+async def proxy_image(url: str, sig: str):
 	"""
 	Proxy images from Google domains to bypass browser security policies.
-	Requires a valid HMAC signature and Uses GeminiClient's authenticated session.
+	Requires a valid HMAC signature.
+	Uses anonymous request pattern (no cookies) with specific headers to mimic Gemini web app.
 	"""
 	# Verify signature
 	expected_sig = get_image_signature(url)
@@ -226,34 +227,42 @@ async def proxy_image(url: str, sig: str, gemini: GeminiClient = Depends(get_gem
 		logger.warning(f"Blocked proxy request for domain: {domain}")
 		raise HTTPException(status_code=403, detail="Domain not allowed")
 
-	try:
-		# Use the internal session of GeminiClient which already has cookies and headers
-		# gemini-webapi uses httpx under the hood, and gemini.client is the AsyncClient instance
-		if gemini.client is None:
-			logger.error("GeminiClient internal httpx client is not initialized")
-			raise HTTPException(status_code=500, detail="Gemini client session not initialized")
+	headers = {
+		"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 Edg/144.0.0.0",
+		"Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+		"Accept-Language": "en-US,en;q=0.9",
+		"Referer": "https://gemini.google.com/",
+		"preferanonymous": "1",
+		"Cache-Control": "no-cache",
+		"Pragma": "no-cache",
+	}
 
-		resp = await gemini.client.get(url, follow_redirects=True, timeout=15.0)
-		if resp.status_code != 200:
-			logger.error(f"Google returned {resp.status_code} for image: {url}")
-		
-		resp.raise_for_status()
+	# IMPORTANT: Use a clean AsyncClient WITHOUT the Gemini session cookies.
+	# Official Gemini web app fetches these images anonymously with 'preferanonymous: 1'.
+	async with httpx.AsyncClient() as client:
+		try:
+			resp = await client.get(url, follow_redirects=True, timeout=15.0, headers=headers)
+			if resp.status_code != 200:
+				logger.error(f"Google returned {resp.status_code} for image: {url}")
+			
+			resp.raise_for_status()
 
-		return Response(
-			content=resp.content,
-			media_type=resp.headers.get("content-type", "image/png"),
-			headers={
-				"Cross-Origin-Resource-Policy": "cross-origin",
-				"Access-Control-Allow-Origin": "*",
-				"Cache-Control": "public, max-age=86400",  # Cache for 24 hours
-			},
-		)
-	except httpx.HTTPStatusError as e:
-		logger.error(f"Failed to fetch image: {e.response.status_code} for {url}")
-		raise HTTPException(status_code=e.response.status_code, detail=f"Failed to fetch image: Google returned {e.response.status_code}")
-	except Exception as e:
-		logger.error(f"Proxy error: {str(e)}")
-		raise HTTPException(status_code=500, detail=f"Internal proxy error: {str(e)}")
+			return Response(
+				content=resp.content,
+				media_type=resp.headers.get("content-type", "image/png"),
+				headers={
+					"Cross-Origin-Resource-Policy": "cross-origin",
+					"Access-Control-Allow-Origin": "*",
+					"Cache-Control": "public, max-age=86400",  # Cache for 24 hours
+				},
+			)
+		except httpx.HTTPStatusError as e:
+			logger.error(f"Failed to fetch image: {e.response.status_code} for {url}")
+			raise HTTPException(status_code=e.response.status_code, detail=f"Failed to fetch image: Google returned {e.response.status_code}")
+		except Exception as e:
+			logger.error(f"Proxy error: {str(e)}")
+			raise HTTPException(status_code=500, detail=f"Internal proxy error: {str(e)}")
+
 
 
 # Simple error handler middleware
