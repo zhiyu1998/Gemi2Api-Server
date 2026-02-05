@@ -206,10 +206,26 @@ async def proxy_image(url: str, sig: str):
 		logger.warning(f"Blocked proxy request for domain: {domain}")
 		raise HTTPException(status_code=403, detail="Domain not allowed")
 
+	headers = {
+		"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+		"Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+		"Accept-Language": "en-US,en;q=0.9",
+		"Referer": "https://gemini.google.com/",
+	}
+
+	cookies = {
+		"__Secure-1PSID": SECURE_1PSID,
+		"__Secure-1PSIDTS": SECURE_1PSIDTS,
+	}
+
 	async with httpx.AsyncClient() as client:
 		try:
 			# Gemini image URLs often redirect
-			resp = await client.get(url, follow_redirects=True, timeout=10.0)
+			resp = await client.get(url, follow_redirects=True, timeout=15.0, headers=headers, cookies=cookies)
+			if resp.status_code != 200:
+				logger.error(f"Google returned {resp.status_code} for image: {url}")
+				logger.debug(f"Response headers: {resp.headers}")
+			
 			resp.raise_for_status()
 
 			return Response(
@@ -223,10 +239,11 @@ async def proxy_image(url: str, sig: str):
 			)
 		except httpx.HTTPStatusError as e:
 			logger.error(f"Failed to fetch image: {e.response.status_code} for {url}")
-			raise HTTPException(status_code=e.response.status_code, detail="Failed to fetch image")
+			raise HTTPException(status_code=e.response.status_code, detail=f"Failed to fetch image: Google returned {e.response.status_code}")
 		except Exception as e:
 			logger.error(f"Proxy error: {str(e)}")
-			raise HTTPException(status_code=500, detail="Internal proxy error")
+			raise HTTPException(status_code=500, detail=f"Internal proxy error: {str(e)}")
+
 
 
 # Simple error handler middleware
