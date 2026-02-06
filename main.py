@@ -308,9 +308,9 @@ async def get_gemini_client():
 
 def get_image_signature(url: str) -> str:
 	"""
-	Generate a HMAC-SHA256 signature for the image URL using API_KEY as secret.
+	Generate a HMAC-SHA256 signature for the image URL using SECURE_1PSID as secret.
 	"""
-	secret = API_KEY.encode()
+	secret = SECURE_1PSID.encode()
 	return hmac.new(secret, url.encode(), hashlib.sha256).hexdigest()
 
 
