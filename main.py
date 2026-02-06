@@ -12,7 +12,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Union
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
@@ -502,17 +502,27 @@ async def proxy_image(url: str, sig: str):
 
 	# Prevent open proxying
 	allowed_domains = ["google.com", "googleusercontent.com", "gstatic.com"]
-	# Extract domain from URL
-	match = re.search(r"https?://([^/]+)", url)
-	if not match:
+	
+	try:
+		parsed = urlparse(url)
+		if parsed.scheme not in ["http", "https"]:
+			logger.warning(f"Invalid scheme in proxy request: {parsed.scheme}")
+			raise HTTPException(status_code=400, detail="Invalid URL scheme")
+		
+		hostname = parsed.hostname
+		if not hostname:
+			logger.warning(f"No hostname in proxy request: {url}")
+			raise HTTPException(status_code=400, detail="Invalid URL")
+		
+		hostname = hostname.lower()
+		is_allowed = any(hostname == d or hostname.endswith("." + d) for d in allowed_domains)
+		
+		if not is_allowed:
+			logger.warning(f"Blocked proxy request for domain: {hostname}")
+			raise HTTPException(status_code=403, detail="Domain not allowed")
+	except ValueError:
+		logger.warning(f"Malformed URL in proxy request: {url}")
 		raise HTTPException(status_code=400, detail="Invalid URL")
-
-	domain = match.group(1).lower()
-	is_allowed = any(domain == d or domain.endswith("." + d) for d in allowed_domains)
-
-	if not is_allowed:
-		logger.warning(f"Blocked proxy request for domain: {domain}")
-		raise HTTPException(status_code=403, detail="Domain not allowed")
 
 	# Minimal browser-like headers
 	headers = {
