@@ -179,95 +179,6 @@ async def verify_api_key(authorization: str = Header(None)):
 
 	return token
 
-def get_image_signature(url: str) -> str:
-	"""
-	Generate a HMAC-SHA256 signature for the image URL using API_KEY as secret.
-	"""
-	secret = API_KEY.encode()
-	return hmac.new(secret, url.encode(), hashlib.sha256).hexdigest()
-
-
-# Dependency to get the initialized Gemini client
-async def get_gemini_client():
-	global gemini_client
-	if gemini_client is None:
-		try:
-			gemini_client = GeminiClient(SECURE_1PSID, SECURE_1PSIDTS)
-			await gemini_client.init(timeout=300)
-		except Exception as e:
-			logger.error(f"Failed to initialize Gemini client: {str(e)}")
-			raise HTTPException(status_code=500, detail=f"Failed to initialize Gemini client: {str(e)}")
-	return gemini_client
-
-
-@app.get("/gemini-proxy/image")
-async def proxy_image(url: str, sig: str):
-	"""
-	Proxy images from Google domains to bypass browser security policies.
-	Requires a valid HMAC signature.
-	Uses the session's authenticated cookies to match gemini-webapi's native fetch logic.
-	"""
-	# Verify signature
-	expected_sig = get_image_signature(url)
-	if not hmac.compare_digest(sig, expected_sig):
-		logger.warning(f"Invalid signature for proxy request: {url}")
-		raise HTTPException(status_code=403, detail="Invalid signature")
-
-	# Basic validation to prevent open proxying
-	allowed_domains = ["google.com", "googleusercontent.com", "gstatic.com"]
-	# Extract domain from URL
-	match = re.search(r"https?://([^/]+)", url)
-	if not match:
-		raise HTTPException(status_code=400, detail="Invalid URL")
-
-	domain = match.group(1).lower()
-	is_allowed = any(domain == d or domain.endswith("." + d) for d in allowed_domains)
-
-	if not is_allowed:
-		logger.warning(f"Blocked proxy request for domain: {domain}")
-		raise HTTPException(status_code=403, detail="Domain not allowed")
-
-	# Standard browser-like headers, but minimal
-	headers = {
-		"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 Edg/144.0.0.0",
-		"Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-		"Accept-Language": "en-US,en;q=0.9",
-		"Referer": "https://gemini.google.com/",
-	}
-
-	# Cookies required by Google for authenticated image resources
-	cookies = {
-		"__Secure-1PSID": SECURE_1PSID,
-		"__Secure-1PSIDTS": SECURE_1PSIDTS,
-	}
-
-	# IMPORTANT: Use a clean AsyncClient with ONLY the session cookies.
-	# We use HTTP/2 and follow_redirects=True to mimic the native gemini-webapi Image.save logic.
-	async with httpx.AsyncClient(http2=True, cookies=cookies, follow_redirects=True) as client:
-		try:
-			resp = await client.get(url, timeout=15.0, headers=headers)
-			
-			if resp.status_code != 200:
-				logger.error(f"Google returned {resp.status_code} for image: {url}")
-			
-			resp.raise_for_status()
-
-			return Response(
-				content=resp.content,
-				media_type=resp.headers.get("content-type", "image/png"),
-				headers={
-					"Cross-Origin-Resource-Policy": "cross-origin",
-					"Access-Control-Allow-Origin": "*",
-					"Cache-Control": "public, max-age=86400",  # Cache for 24 hours
-				},
-			)
-		except httpx.HTTPStatusError as e:
-			logger.error(f"Failed to fetch image: {e.response.status_code} for {url}")
-			raise HTTPException(status_code=e.response.status_code, detail=f"Failed to fetch image: Google returned {e.response.status_code}")
-		except Exception as e:
-			logger.error(f"Proxy error: {str(e)}")
-			raise HTTPException(status_code=500, detail=f"Internal proxy error: {str(e)}")
-
 
 # Simple error handler middleware
 @app.middleware("http")
@@ -382,6 +293,27 @@ def prepare_conversation(messages: List[Message]) -> tuple:
 	return conversation, temp_files
 
 
+# Dependency to get the initialized Gemini client
+async def get_gemini_client():
+	global gemini_client
+	if gemini_client is None:
+		try:
+			gemini_client = GeminiClient(SECURE_1PSID, SECURE_1PSIDTS)
+			await gemini_client.init(timeout=300)
+		except Exception as e:
+			logger.error(f"Failed to initialize Gemini client: {str(e)}")
+			raise HTTPException(status_code=500, detail=f"Failed to initialize Gemini client: {str(e)}")
+	return gemini_client
+
+
+def get_image_signature(url: str) -> str:
+	"""
+	Generate a HMAC-SHA256 signature for the image URL using API_KEY as secret.
+	"""
+	secret = API_KEY.encode()
+	return hmac.new(secret, url.encode(), hashlib.sha256).hexdigest()
+
+
 @app.post("/v1/chat/completions")
 async def create_chat_completion(request: ChatCompletionRequest, raw_request: Request, gemini_client: GeminiClient = Depends(get_gemini_client), api_key: str = Depends(verify_api_key)):
 	try:
@@ -421,7 +353,7 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
 		if hasattr(response, "images") and response.images:
 			base_url = PUBLIC_BASE_URL or str(raw_request.base_url).rstrip("/")
 			for img in response.images:
-				# 检查对象是否有 url 属性 (GeneratedImage 或 WebImage)
+				# 检查对象是否有 url 属性
 				img_url = getattr(img, "url", None)
 				if img_url:
 					sig = get_image_signature(img_url)
@@ -503,6 +435,73 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
 	except Exception as e:
 		logger.error(f"Error generating completion: {str(e)}", exc_info=True)
 		raise HTTPException(status_code=500, detail=f"Error generating completion: {str(e)}")
+
+
+@app.get("/gemini-proxy/image")
+async def proxy_image(url: str, sig: str):
+	"""
+	Proxy images from Google domains to bypass browser security policies.
+	Requires a valid HMAC signature.
+	"""
+	# Verify signature
+	expected_sig = get_image_signature(url)
+	if not hmac.compare_digest(sig, expected_sig):
+		logger.warning(f"Invalid signature for proxy request: {url}")
+		raise HTTPException(status_code=403, detail="Invalid signature")
+
+	# Prevent open proxying
+	allowed_domains = ["google.com", "googleusercontent.com", "gstatic.com"]
+	# Extract domain from URL
+	match = re.search(r"https?://([^/]+)", url)
+	if not match:
+		raise HTTPException(status_code=400, detail="Invalid URL")
+
+	domain = match.group(1).lower()
+	is_allowed = any(domain == d or domain.endswith("." + d) for d in allowed_domains)
+
+	if not is_allowed:
+		logger.warning(f"Blocked proxy request for domain: {domain}")
+		raise HTTPException(status_code=403, detail="Domain not allowed")
+
+	# Minimal browser-like headers
+	headers = {
+		"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 Edg/144.0.0.0",
+		"Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+		"Accept-Language": "en-US,en;q=0.9",
+		"Referer": "https://gemini.google.com/",
+	}
+
+	# Cookies required by Google for authenticated image resources
+	cookies = {
+		"__Secure-1PSID": SECURE_1PSID,
+		"__Secure-1PSIDTS": SECURE_1PSIDTS,
+	}
+
+	# Use HTTP/2 and follow_redirects=True to mimic the gemini-webapi Image.save logic.
+	async with httpx.AsyncClient(http2=True, cookies=cookies, follow_redirects=True) as client:
+		try:
+			resp = await client.get(url, timeout=15.0, headers=headers)
+			
+			if resp.status_code != 200:
+				logger.error(f"Google returned {resp.status_code} for image: {url}")
+			
+			resp.raise_for_status()
+
+			return Response(
+				content=resp.content,
+				media_type=resp.headers.get("content-type", "image/png"),
+				headers={
+					"Cross-Origin-Resource-Policy": "cross-origin",
+					"Access-Control-Allow-Origin": "*",
+					"Cache-Control": "public, max-age=86400",  # Cache for 24 hours
+				},
+			)
+		except httpx.HTTPStatusError as e:
+			logger.error(f"Failed to fetch image: {e.response.status_code} for {url}")
+			raise HTTPException(status_code=e.response.status_code, detail=f"Failed to fetch image: Google returned {e.response.status_code}")
+		except Exception as e:
+			logger.error(f"Proxy error: {str(e)}")
+			raise HTTPException(status_code=500, detail=f"Internal proxy error: {str(e)}")
 
 
 @app.get("/")
