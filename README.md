@@ -20,11 +20,12 @@
 SECURE_1PSID = "COOKIE VALUE HERE"
 SECURE_1PSIDTS = "COOKIE VALUE HERE"
 API_KEY= "API_KEY VALUE HERE"
+PUBLIC_BASE_URL = "https://your-domain.com" # 外部URL，用于生成图片代理链接，不填则会使用内部地址。使用反向代理时必填，否则可能导致图片无法访问。
 ```
 1. `uv` 安装一下依赖
 > uv init
 > 
-> uv add fastapi uvicorn gemini-webapi
+> uv add fastapi uvicorn gemini-webapi httpx h2
 
 > [!NOTE]  
 > 如果存在`pyproject.toml` 那么就使用下面的命令：  
@@ -32,7 +33,7 @@ API_KEY= "API_KEY VALUE HERE"
 
 或者 `pip` 也可以
 
-> pip install fastapi uvicorn gemini-webapi
+> pip install fastapi uvicorn gemini-webapi httpx h2
 
 2. 激活一下环境
 > source venv/bin/activate
@@ -86,6 +87,7 @@ docker-compose up -d --build
 - `GET /`: 服务状态检查
 - `GET /v1/models`: 获取可用模型列表
 - `POST /v1/chat/completions`: 与模型聊天 (类似OpenAI接口)
+- `GET /gemini-proxy/image`: 图片代理接口（有生成图片需求时，需要保证此端点可直接访问，如果使用反向代理则需要填写`PUBLIC_BASE_URL`环境变量）
 
 ## 常见问题
 

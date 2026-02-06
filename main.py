@@ -1,16 +1,21 @@
 import asyncio
 import base64
+import hmac
+import hashlib
 import json
 import logging
 import os
 import re
+import secrets
 import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Union
+from urllib.parse import quote, urlparse
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+import httpx
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from gemini_webapi import GeminiClient, set_log_level
@@ -41,6 +46,49 @@ SECURE_1PSID = os.environ.get("SECURE_1PSID", "")
 SECURE_1PSIDTS = os.environ.get("SECURE_1PSIDTS", "")
 API_KEY = os.environ.get("API_KEY", "")
 ENABLE_THINKING = os.environ.get("ENABLE_THINKING", "false").lower() == "true"
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+SECRET_FILE_PATH = os.path.join(os.path.dirname(__file__), "secrets", "proxy_secret")
+
+
+def load_or_generate_secret() -> str:
+	"""
+	Load the signature secret from file, or generate a new one if not found.
+	"""
+	if os.path.exists(SECRET_FILE_PATH):
+		try:
+			with open(SECRET_FILE_PATH, "r") as f:
+				secret = f.read().strip()
+				if secret:
+					logger.info(f"Loaded proxy secret from {SECRET_FILE_PATH}")
+					return secret
+		except Exception as e:
+			logger.warning(f"Failed to read secret file, trying to generate a new one: {e}")
+
+	# Generate new secret if not found or error occurred
+	new_secret = secrets.token_hex(32)
+	try:
+		# Ensure directory exists
+		os.makedirs(os.path.dirname(SECRET_FILE_PATH), exist_ok=True)
+		with open(SECRET_FILE_PATH, "w") as f:
+			f.write(new_secret)
+		
+		# Set restrictive permissions (user-only readable/writable)
+		try:
+			os.chmod(SECRET_FILE_PATH, 0o600)
+		except Exception as e:
+			logger.warning(f"Failed to set restrictive permissions on {SECRET_FILE_PATH}: {e}")
+			
+		logger.info(f"Generated new proxy secret and saved to {SECRET_FILE_PATH}")
+		return new_secret
+	except Exception as e:
+		logger.error(f"Error writing secret file: {e}")
+		# if unable to save, return an in-memory ephemeral secret instead of using API_KEY or SECURE_1PSID
+		ephemeral_secret = secrets.token_urlsafe(32)
+		logger.warning("Using an in-memory secret to proxy images for this session.")
+		return ephemeral_secret
+
+
+SIGNATURE_SECRET = load_or_generate_secret()
 
 # Print debug info at startup
 if not SECURE_1PSID or not SECURE_1PSIDTS:
@@ -301,8 +349,16 @@ async def get_gemini_client():
 	return gemini_client
 
 
+def get_image_signature(url: str) -> str:
+	"""
+	Generate a HMAC-SHA256 signature for the image URL using the persistent SIGNATURE_SECRET.
+	"""
+	secret = SIGNATURE_SECRET.encode()
+	return hmac.new(secret, url.encode(), hashlib.sha256).hexdigest()
+
+
 @app.post("/v1/chat/completions")
-async def create_chat_completion(request: ChatCompletionRequest, api_key: str = Depends(verify_api_key)):
+async def create_chat_completion(request: ChatCompletionRequest, raw_request: Request, api_key: str = Depends(verify_api_key)):
 	try:
 		# 确保客户端已初始化
 		global gemini_client
@@ -345,6 +401,16 @@ async def create_chat_completion(request: ChatCompletionRequest, api_key: str = 
 			reply_text += response.text
 		else:
 			reply_text += str(response)
+		# 提取并追加图片响应
+		if hasattr(response, "images") and response.images:
+			base_url = PUBLIC_BASE_URL or str(raw_request.base_url).rstrip("/")
+			for img in response.images:
+				# 检查对象是否有 url 属性
+				img_url = getattr(img, "url", None)
+				if img_url:
+					sig = get_image_signature(img_url)
+					proxy_url = f"{base_url}/gemini-proxy/image?url={quote(img_url)}&sig={sig}"
+					reply_text += f"\n\n![image]({proxy_url})"
 		reply_text = reply_text.replace("&lt;", "<").replace("\\<", "<").replace("\\_", "_").replace("\\>", ">")
 		reply_text = correct_markdown(reply_text)
 
@@ -419,6 +485,102 @@ async def create_chat_completion(request: ChatCompletionRequest, api_key: str = 
 	except Exception as e:
 		logger.error(f"Error generating completion: {str(e)}", exc_info=True)
 		raise HTTPException(status_code=500, detail=f"Error generating completion: {str(e)}")
+
+
+@app.get("/gemini-proxy/image")
+async def proxy_image(url: str, sig: str):
+	"""
+	Proxy images from Google domains to bypass browser security policies.
+	Requires a valid HMAC signature.
+	"""
+	# Verify signature
+	expected_sig = get_image_signature(url)
+	if not hmac.compare_digest(sig, expected_sig):
+		logger.warning(f"Invalid signature for proxy request: {url}")
+		raise HTTPException(status_code=403, detail="Invalid signature")
+
+	# Prevent open proxying
+	allowed_domains = ["google.com", "googleusercontent.com", "gstatic.com"]
+	
+	try:
+		parsed = urlparse(url)
+		if parsed.scheme not in ["http", "https"]:
+			logger.warning(f"Invalid scheme in proxy request: {parsed.scheme}")
+			raise HTTPException(status_code=400, detail="Invalid URL scheme")
+		
+		hostname = parsed.hostname
+		if not hostname:
+			logger.warning(f"No hostname in proxy request: {url}")
+			raise HTTPException(status_code=400, detail="Invalid URL")
+		
+		hostname = hostname.lower()
+		is_allowed = any(hostname == d or hostname.endswith("." + d) for d in allowed_domains)
+		
+		if not is_allowed:
+			logger.warning(f"Blocked proxy request for domain: {hostname}")
+			raise HTTPException(status_code=403, detail="Domain not allowed")
+	except ValueError:
+		logger.warning(f"Malformed URL in proxy request: {url}")
+		raise HTTPException(status_code=400, detail="Invalid URL")
+
+	# Minimal browser-like headers
+	headers = {
+		"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 Edg/144.0.0.0",
+		"Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+		"Accept-Language": "en-US,en;q=0.9",
+		"Referer": "https://gemini.google.com/",
+	}
+
+	# 10MB limit
+	MAX_BYTES = 10 * 1024 * 1024
+
+	# Use scoped cookies to prevent leakage during redirects
+	jar = httpx.Cookies()
+	jar.set("__Secure-1PSID", SECURE_1PSID, domain=".google.com")
+	jar.set("__Secure-1PSIDTS", SECURE_1PSIDTS, domain=".google.com")
+	jar.set("__Secure-1PSID", SECURE_1PSID, domain=".googleusercontent.com")
+	jar.set("__Secure-1PSIDTS", SECURE_1PSIDTS, domain=".googleusercontent.com")
+
+	async with httpx.AsyncClient(http2=True, cookies=jar, follow_redirects=True) as client:
+		try:
+			async with client.stream("GET", url, timeout=15.0, headers=headers) as resp:
+				if resp.status_code != 200:
+					logger.error(f"Google returned {resp.status_code} for image: {url}")
+				
+				resp.raise_for_status()
+
+				content = bytearray()
+				async for chunk in resp.aiter_bytes():
+					content.extend(chunk)
+					if len(content) > MAX_BYTES:
+						logger.warning(f"Image too large: {url} (exceeded {MAX_BYTES} bytes)")
+						raise HTTPException(status_code=413, detail="Image too large")
+				# Validate Content-Type to prevent XSS/MIME sniffing
+				upstream_content_type = resp.headers.get("content-type", "image/png").lower()
+				if not upstream_content_type.startswith("image/"):
+					logger.warning(f"Rejected non-image Content-Type: {upstream_content_type} for {url}")
+					media_type = "image/png"
+				else:
+					media_type = upstream_content_type
+
+				return Response(
+					content=bytes(content),
+					media_type=media_type,
+					headers={
+						"Cross-Origin-Resource-Policy": "cross-origin",
+						"Access-Control-Allow-Origin": "*",
+						"Cache-Control": "public, max-age=86400",  # Cache for 24 hours
+						"X-Content-Type-Options": "nosniff",
+					},
+				)
+		except httpx.HTTPStatusError as e:
+			logger.error(f"Failed to fetch image: {e.response.status_code} for {url}")
+			raise HTTPException(status_code=e.response.status_code, detail=f"Failed to fetch image: Google returned {e.response.status_code}")
+		except HTTPException:
+			raise
+		except Exception as e:
+			logger.error(f"Proxy error: {str(e)}")
+			raise HTTPException(status_code=500, detail="Internal proxy error")
 
 
 @app.get("/")
