@@ -15,11 +15,27 @@
 
 ## 直接运行
 
-0. 填入 `SECURE_1PSID` 和 `SECURE_1PSIDTS`（登录 Gemini 在浏览器开发工具中查找 Cookie），有必要的话可以填写 `API_KEY`
+0. 配置 `.env` 文件（登录 Gemini 在浏览器开发工具中查找 Cookie），有必要的话可以填写 `API_KEY`
+
+**方式一：多账号池（推荐）** — 支持粘性会话 + 并发限流
+```properties
+# 多账号 JSON 数组（每个对象包含一组 Cookie）
+GEMINI_COOKIES_POOL = '[{"__Secure-1PSID":"账号1_PSID","__Secure-1PSIDTS":"账号1_PSIDTS"},{"__Secure-1PSID":"账号2_PSID","__Secure-1PSIDTS":"账号2_PSIDTS"}]'
+MAX_CONCURRENT_PER_ACCOUNT = 3 # 每个账号最大并发请求数，默认3
+API_KEY= "API_KEY VALUE HERE"
+```
+> [!TIP]
+> 粘性会话机制：相同的 `Authorization` header 会通过哈希始终路由到同一个账号，保证对话上下文连贯。不同用户/token 自动分散到不同账号。
+
+**方式二：单账号（传统模式）** — 如果只有一个账号
 ```properties
 SECURE_1PSID = "COOKIE VALUE HERE"
 SECURE_1PSIDTS = "COOKIE VALUE HERE"
 API_KEY= "API_KEY VALUE HERE"
+```
+
+**通用配置项**
+```properties
 TEMPORARY_CHAT = "false" # 使用临时对话模式，此模式会禁用部分功能如思考、图片生成等，默认关闭。
 AUTO_DELETE_CHAT = "true" # 生成结束后自动从web端删除对话记录，默认开启。TEMPORARY_CHAT为true时，此项无效。
 PUBLIC_BASE_URL = "https://your-domain.com" # 外部URL，用于生成图片代理链接，不填则会使用内部地址。使用反向代理时必填，否则可能导致图片无法访问。
@@ -90,6 +106,46 @@ docker-compose up -d --build
 - `GET /v1/models`: 获取可用模型列表
 - `POST /v1/chat/completions`: 与模型聊天 (类似OpenAI接口)
 - `GET /gemini-proxy/image`: 图片代理接口（有生成图片需求时，需要保证此端点可直接访问，如果使用反向代理则需要填写`PUBLIC_BASE_URL`环境变量）
+
+## 多账号粘性会话 (Sticky Session)
+
+本项目支持通过 `GEMINI_COOKIES_POOL` 配置多个 Gemini 账号，实现**负载分散 + 会话上下文连贯**。
+
+### 工作原理
+
+```
+用户 A (Bearer token-xxx) → MD5 哈希 → 始终命中 Client #2
+用户 B (Bearer token-yyy) → MD5 哈希 → 始终命中 Client #0
+用户 C (Bearer token-zzz) → MD5 哈希 → 始终命中 Client #1
+```
+
+- ✅ **同一用户的多轮对话** 始终路由到同一个账号，上下文不丢失
+- ✅ **不同用户/token** 自动分散到不同账号，负载均衡
+- ✅ **每个账号并发限流**（默认 3 个并发，可通过 `MAX_CONCURRENT_PER_ACCOUNT` 调整）
+
+### 启动日志示例
+
+```
+INFO:main:🏊 Loaded 3 account(s) from GEMINI_COOKIES_POOL
+INFO:main:✅ Client #0 initialized (PSID=g.a00074...)
+INFO:main:✅ Client #1 initialized (PSID=g.a00074...)
+INFO:main:✅ Client #2 initialized (PSID=g.a00074...)
+INFO:main:🚀 Client pool ready: 3 active client(s), max 3 concurrent per account
+```
+
+### 请求分发日志
+
+```
+INFO:main:🔀 Sticky dispatch: token_hash=a1b2c3d4... → client #2 (pool_size=3)
+```
+
+### 容量估算
+
+| 账号数 | 每账号并发 | 全局最大同时请求 |
+|--------|-----------|-----------------|
+| 3      | 3         | 9               |
+| 5      | 3         | 15              |
+| 5      | 5         | 25              |
 
 ## 常见问题
 

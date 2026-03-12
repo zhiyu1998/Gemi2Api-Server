@@ -9,7 +9,7 @@ This is a FastAPI-based server that provides OpenAI-compatible API endpoints for
 ### Core Components
 
 - **main.py**: Single-file application containing all API endpoints, authentication, and request handling
-- **Authentication**: Uses Gemini cookies (`SECURE_1PSID`, `SECURE_1PSIDTS`) for Gemini API access and optional `API_KEY` for server authentication
+- **Authentication**: Supports multi-account cookie pool (`GEMINI_COOKIES_POOL` JSON array) or single-account (`SECURE_1PSID`, `SECURE_1PSIDTS`). Optional `API_KEY` for server authentication
 - **API Endpoints**:
   - `GET /`: Health check endpoint
   - `GET /v1/models`: Lists available Gemini models in OpenAI format
@@ -23,6 +23,7 @@ This is a FastAPI-based server that provides OpenAI-compatible API endpoints for
 - Markdown link correction for Google search results
 - CORS enabled for web clients
 - Docker containerization with uv package manager
+- **Multi-account client pool with sticky session dispatch** (hash-based on Authorization header)
 
 ## Coding Conventions
 
@@ -84,8 +85,10 @@ docker-compose down
 ## Configuration
 
 ### Required Environment Variables
-- `SECURE_1PSID`: Gemini cookie for authentication (obtained from browser dev tools)
-- `SECURE_1PSIDTS`: Gemini cookie timestamp for authentication
+- `GEMINI_COOKIES_POOL`: JSON array of cookie objects for multi-account pool (preferred, overrides single-account vars)
+  - Format: `[{"__Secure-1PSID":"...","__Secure-1PSIDTS":"..."}, ...]`
+- `SECURE_1PSID`: Single-account Gemini cookie (legacy fallback)
+- `SECURE_1PSIDTS`: Single-account Gemini cookie timestamp (legacy fallback)
 - `API_KEY`: Optional server authentication key
 - `ENABLE_THINKING`: Optional boolean to enable thinking content in responses (default: false)
 
@@ -104,8 +107,9 @@ The server maps OpenAI model names to Gemini models through `map_model_name()` f
 
 1. Client sends OpenAI-compatible request to `/v1/chat/completions`
 2. Server authenticates using optional API_KEY
-3. Messages are converted from OpenAI format to conversation string
-4. Images are decoded from base64 and saved to temporary files
-5. Request is sent to Gemini via `gemini-webapi`
-6. Response is processed, markdown corrected, and returned in OpenAI format
-7. Temporary files are cleaned up
+3. **Sticky session dispatch**: Authorization header is hashed to select a deterministic client from the pool
+4. Messages are converted from OpenAI format to conversation string
+5. Images are decoded from base64 and saved to temporary files
+6. Request is sent to Gemini via `gemini-webapi` using the selected client
+7. Response is processed, markdown corrected, and returned in OpenAI format
+8. Temporary files are cleaned up

@@ -42,18 +42,87 @@ app.add_middleware(
 	allow_headers=["*"],
 )
 
-# Global client
-gemini_client = None
-
-# Authentication credentials
-SECURE_1PSID = os.environ.get("SECURE_1PSID", "")
-SECURE_1PSIDTS = os.environ.get("SECURE_1PSIDTS", "")
+# ---------------------------------------------------------------------------
+# Multi-account client pool & configuration
+# ---------------------------------------------------------------------------
 API_KEY = os.environ.get("API_KEY", "")
 ENABLE_THINKING = os.environ.get("ENABLE_THINKING", "false").lower() == "true"
 TEMPORARY_CHAT = os.environ.get("TEMPORARY_CHAT", "false").lower() == "true"
 AUTO_DELETE_CHAT = os.environ.get("AUTO_DELETE_CHAT", "true").lower() == "true" and not TEMPORARY_CHAT
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 SECRET_FILE_PATH = os.path.join(os.path.dirname(__file__), "secrets", "proxy_secret")
+MAX_CONCURRENT_PER_ACCOUNT = int(os.environ.get("MAX_CONCURRENT_PER_ACCOUNT", "3"))
+
+# --- Cookie pool parsing (backward-compatible) ---
+_COOKIES_POOL_RAW = os.environ.get("GEMINI_COOKIES_POOL", "")
+_SECURE_1PSID_LEGACY = os.environ.get("SECURE_1PSID", "")
+_SECURE_1PSIDTS_LEGACY = os.environ.get("SECURE_1PSIDTS", "")
+
+cookie_entries: List[Dict[str, str]] = []
+
+if _COOKIES_POOL_RAW:
+	try:
+		_parsed = json.loads(_COOKIES_POOL_RAW)
+		if isinstance(_parsed, list) and len(_parsed) > 0:
+			cookie_entries = _parsed
+			logger.info(f"🏊 Loaded {len(cookie_entries)} account(s) from GEMINI_COOKIES_POOL")
+		else:
+			logger.warning("⚠️ GEMINI_COOKIES_POOL is not a non-empty JSON array, falling back to single-account mode")
+	except json.JSONDecodeError as e:
+		logger.error(f"❌ Failed to parse GEMINI_COOKIES_POOL: {e}")
+
+if not cookie_entries and _SECURE_1PSID_LEGACY:
+	cookie_entries = [{"__Secure-1PSID": _SECURE_1PSID_LEGACY, "__Secure-1PSIDTS": _SECURE_1PSIDTS_LEGACY}]
+	logger.info("📌 Using legacy single-account mode (SECURE_1PSID / SECURE_1PSIDTS)")
+
+if not cookie_entries:
+	logger.warning("⚠️ No Gemini credentials configured! Set GEMINI_COOKIES_POOL or SECURE_1PSID/SECURE_1PSIDTS.")
+
+# Global client pool (populated at startup)
+client_pool: List[GeminiClient] = []
+account_semaphores: List[asyncio.Semaphore] = []
+
+
+@app.on_event("startup")
+async def _init_client_pool():
+	"""Initialize one GeminiClient per cookie entry at application startup."""
+	for i, entry in enumerate(cookie_entries):
+		psid = entry.get("__Secure-1PSID", "")
+		psidts = entry.get("__Secure-1PSIDTS", "")
+		if not psid:
+			logger.warning(f"⚠️ Account #{i} has no __Secure-1PSID, skipping")
+			continue
+		try:
+			client = GeminiClient(psid, psidts)
+			await client.init(timeout=300)
+			client_pool.append(client)
+			logger.info(f"✅ Client #{len(client_pool) - 1} initialized (PSID={psid[:8]}...)")
+		except Exception as e:
+			logger.error(f"❌ Failed to initialize client #{i}: {e}")
+	if client_pool:
+		# Create per-account semaphores for concurrency limiting
+		for _ in client_pool:
+			account_semaphores.append(asyncio.Semaphore(MAX_CONCURRENT_PER_ACCOUNT))
+		logger.info(f"🚀 Client pool ready: {len(client_pool)} active client(s), max {MAX_CONCURRENT_PER_ACCOUNT} concurrent per account")
+	else:
+		logger.error("❌ Client pool is EMPTY — all requests will fail with 503")
+
+
+def get_sticky_client(authorization: Optional[str]) -> tuple:
+	"""
+	Select a client from the pool using hash-based sticky session.
+	The same Authorization token always maps to the same client,
+	ensuring context/session continuity.
+	"""
+	if not client_pool:
+		return None, -1
+	if len(client_pool) == 1:
+		return client_pool[0], 0
+	key = authorization or "__default__"
+	digest = hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
+	index = int(digest, 16) % len(client_pool)
+	logger.info(f"🔀 Sticky dispatch: token_hash={digest[:8]}... → client #{index} (pool_size={len(client_pool)})")
+	return client_pool[index], index
 
 async def background_delete_chat(client: GeminiClient, cid: str):
 	"""Deletes a chat conversation in the background to avoid blocking the main thread."""
@@ -181,17 +250,13 @@ def remove_gemini_watermark(image_bytes: bytes) -> bytes:
 
 
 # Print debug info at startup
-if not SECURE_1PSID or not SECURE_1PSIDTS:
-	logger.warning("⚠️ Gemini API credentials are not set or empty! Please check your environment variables.")
-	logger.warning("Make sure SECURE_1PSID and SECURE_1PSIDTS are correctly set in your .env file or environment.")
-	logger.warning("If using Docker, ensure the .env file is correctly mounted and formatted.")
-	logger.warning("Example format in .env file (no quotes):")
-	logger.warning("SECURE_1PSID=your_secure_1psid_value_here")
-	logger.warning("SECURE_1PSIDTS=your_secure_1psidts_value_here")
+if not cookie_entries:
+	logger.warning("⚠️ No Gemini credentials configured!")
+	logger.warning("Set GEMINI_COOKIES_POOL (JSON array) or SECURE_1PSID/SECURE_1PSIDTS in .env")
 else:
-	# Only log the first few characters for security
-	logger.info(f"Credentials found. SECURE_1PSID starts with: {SECURE_1PSID[:5]}...")
-	logger.info(f"Credentials found. SECURE_1PSIDTS starts with: {SECURE_1PSIDTS[:5]}...")
+	for i, entry in enumerate(cookie_entries):
+		psid_preview = entry.get("__Secure-1PSID", "")[:8]
+		logger.info(f"Account #{i}: PSID={psid_preview}...")
 
 if not API_KEY:
 	logger.warning("⚠️ API_KEY is not set or empty! API authentication will not work.")
@@ -444,23 +509,6 @@ def prepare_conversation(messages: List[Message]) -> tuple:
 	return conversation, temp_files
 
 
-# Dependency to get the initialized Gemini client
-async def get_gemini_client():
-	"""
-	Get or initialize the global GeminiClient instance.
-	
-	Raises:
-		HTTPException: If initialization fails due to invalid parameters or connection issues.
-	"""
-	global gemini_client
-	if gemini_client is None:
-		try:
-			gemini_client = GeminiClient(SECURE_1PSID, SECURE_1PSIDTS)
-			await gemini_client.init(timeout=300)
-		except Exception as e:
-			logger.error(f"Failed to initialize Gemini client: {str(e)}")
-			raise HTTPException(status_code=500, detail=f"Failed to initialize Gemini client: {str(e)}")
-	return gemini_client
 
 
 def get_image_signature(url: str) -> str:
@@ -477,7 +525,7 @@ def postprocess_text(text: str) -> str:
 	return correct_markdown(text)
 
 
-def extract_image_markdown(response, base_url: str) -> str:
+def extract_image_markdown(response, base_url: str, account_idx: int = 0) -> str:
 	"""Extract images from a response and return markdown image links."""
 	result = ""
 	if hasattr(response, "images") and response.images:
@@ -485,7 +533,7 @@ def extract_image_markdown(response, base_url: str) -> str:
 			img_url = getattr(img, "url", None)
 			if img_url:
 				sig = get_image_signature(img_url)
-				proxy_url = f"{base_url}/gemini-proxy/image?url={quote(img_url)}&sig={sig}"
+				proxy_url = f"{base_url}/gemini-proxy/image?url={quote(img_url)}&sig={sig}&account={account_idx}"
 				result += f"\n\n![🎨 Loading image...]({proxy_url})"
 	return result
 
@@ -494,16 +542,20 @@ def extract_image_markdown(response, base_url: str) -> str:
 async def create_chat_completion(request: ChatCompletionRequest, raw_request: Request, api_key: str = Depends(verify_api_key)):
 	"""
 	Handle chat completion requests, translating from OpenAI API format to Gemini API format.
-	Supports both streaming and non-streaming responses, caching, thinking features, 
+	Supports both streaming and non-streaming responses, caching, thinking features,
 	and background conversation cleanup based on configuration.
 	"""
 	try:
-		# 确保客户端已初始化
-		global gemini_client
-		if gemini_client is None:
-			gemini_client = GeminiClient(SECURE_1PSID, SECURE_1PSIDTS)
-			await gemini_client.init(timeout=300)
-			logger.info("Gemini client initialized successfully")
+		# Sticky session: select client based on Authorization header hash
+		auth_header = raw_request.headers.get("Authorization")
+		client, client_idx = get_sticky_client(auth_header)
+		if client is None:
+			raise HTTPException(status_code=503, detail="No Gemini clients available. Check GEMINI_COOKIES_POOL config.")
+
+		# Acquire per-account semaphore to limit concurrency
+		semaphore = account_semaphores[client_idx] if client_idx < len(account_semaphores) else None
+		if semaphore and semaphore.locked():
+			logger.info(f"⏳ Client #{client_idx} at concurrency limit, request queued...")
 
 		# 转换消息为对话格式
 		conversation, temp_files = prepare_conversation(request.messages)
@@ -529,131 +581,133 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
 		if request.stream:
 			# Real streaming using upstream generate_content_stream
 			async def generate_stream():
+				async with semaphore if semaphore else asyncio.Semaphore(999):
+					try:
+						logger.info("Starting streaming response from Gemini...")
+
+						def make_chunk(delta: dict, finish_reason=None):
+							return "data: " + json.dumps({
+								"id": completion_id,
+								"object": "chat.completion.chunk",
+								"created": created_time,
+								"model": request.model,
+								"choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+							}) + "\n\n"
+
+						# Send initial role chunk
+						yield make_chunk({"role": "assistant"})
+
+						thinking_started = False
+						thinking_ended = False
+						yielded_images = 0
+						text_buffer = ""
+						captured_cid = None
+
+						async for chunk in client.generate_content_stream(conversation, **gen_kwargs):
+							# Capture conversation ID for auto-deletion
+							if AUTO_DELETE_CHAT and captured_cid is None and hasattr(chunk, "metadata") and chunk.metadata and len(chunk.metadata) > 0:
+								captured_cid = chunk.metadata[0]
+
+							# Handle thinking/thoughts delta
+							if ENABLE_THINKING and hasattr(chunk, "thoughts_delta") and chunk.thoughts_delta:
+								if not thinking_started:
+									yield make_chunk({"content": "<think>\n"})
+									thinking_started = True
+								
+								# Also include reasoning_content for full Open WebUI native compatibility
+								yield make_chunk({
+									"content": chunk.thoughts_delta,
+									"reasoning_content": chunk.thoughts_delta
+								})
+
+							# Handle text delta
+							if hasattr(chunk, "text_delta") and chunk.text_delta:
+								# Close thinking tag before first text content
+								if thinking_started and not thinking_ended:
+									thinking_ended = True
+									yield make_chunk({"content": "\n</think>\n\n"})
+								
+								text_buffer += chunk.text_delta
+								safe_to_yield = False
+								
+								# Yield if buffer ends with whitespace and looks like it's outside a markdown link
+								if text_buffer[-1].isspace() and text_buffer.count('[') == text_buffer.count(']') and text_buffer.count('(') == text_buffer.count(')'):
+									safe_to_yield = True
+								elif len(text_buffer) > 500:
+									safe_to_yield = True
+								
+								if safe_to_yield:
+									yield make_chunk({"content": postprocess_text(text_buffer)})
+									text_buffer = ""
+
+							# Handle inline images as they arrive
+							if hasattr(chunk, "images") and chunk.images and len(chunk.images) > yielded_images:
+								# Close thinking tag if an image arrives before any text
+								if thinking_started and not thinking_ended:
+									thinking_ended = True
+									yield make_chunk({"content": "\n</think>\n\n"})
+
+								new_images = chunk.images[yielded_images:]
+								for img in new_images:
+									img_url = getattr(img, "url", None)
+									if img_url:
+										sig = get_image_signature(img_url)
+										proxy_url = f"{base_url}/gemini-proxy/image?url={quote(img_url)}&sig={sig}&account={client_idx}"
+										img_md = f"\n\n![🎨 Loading image...]({proxy_url})\n\n"
+										yield make_chunk({"content": img_md})
+								yielded_images = len(chunk.images)
+
+						# Flush any remaining text
+						if text_buffer:
+							yield make_chunk({"content": postprocess_text(text_buffer)})
+
+						# Close thinking tag if it was never closed
+						if thinking_started and not thinking_ended:
+							yield make_chunk({"content": "\n</think>\n\n"})
+
+						# Send finish chunk
+						yield make_chunk({}, finish_reason="stop")
+						yield "data: [DONE]\n\n"
+
+						logger.info("Streaming response completed")
+					except Exception as e:
+						logger.error(f"Error during streaming: {str(e)}", exc_info=True)
+						# Send error as a content chunk so the client sees it
+						error_msg = "\n\n[An internal error occurred while streaming]"
+						yield make_chunk({"content": error_msg})
+						yield make_chunk({}, finish_reason="stop")
+						yield "data: [DONE]\n\n"
+					finally:
+						# Create background task to delete the chat if AUTO_DELETE_CHAT is enabled
+						if AUTO_DELETE_CHAT and captured_cid:
+							asyncio.create_task(background_delete_chat(client, captured_cid))
+
+						# 清理临时文件
+						for temp_file in temp_files:
+							try:
+								os.unlink(temp_file)
+							except Exception as e:
+								logger.warning(f"Failed to delete temp file {temp_file}: {str(e)}")
+
+			return StreamingResponse(generate_stream(), media_type="text/event-stream")
+		else:
+			# Non-streaming response with semaphore guard
+			async with semaphore if semaphore else asyncio.Semaphore(999):
+				logger.info("Sending request to Gemini...")
 				try:
-					logger.info("Starting streaming response from Gemini...")
+					response = await client.generate_content(conversation, **gen_kwargs)
+					
+					if AUTO_DELETE_CHAT and hasattr(response, "metadata") and response.metadata and len(response.metadata) > 0:
+						cid = response.metadata[0]
+						asyncio.create_task(background_delete_chat(client, cid))
 
-					def make_chunk(delta: dict, finish_reason=None):
-						return "data: " + json.dumps({
-							"id": completion_id,
-							"object": "chat.completion.chunk",
-							"created": created_time,
-							"model": request.model,
-							"choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
-						}) + "\n\n"
-
-					# Send initial role chunk
-					yield make_chunk({"role": "assistant"})
-
-					thinking_started = False
-					thinking_ended = False
-					yielded_images = 0
-					text_buffer = ""
-					captured_cid = None
-
-					async for chunk in gemini_client.generate_content_stream(conversation, **gen_kwargs):
-						# Capture conversation ID for auto-deletion
-						if AUTO_DELETE_CHAT and captured_cid is None and hasattr(chunk, "metadata") and chunk.metadata and len(chunk.metadata) > 0:
-							captured_cid = chunk.metadata[0]
-
-						# Handle thinking/thoughts delta
-						if ENABLE_THINKING and hasattr(chunk, "thoughts_delta") and chunk.thoughts_delta:
-							if not thinking_started:
-								yield make_chunk({"content": "<think>\n"})
-								thinking_started = True
-							
-							# Also include reasoning_content for full Open WebUI native compatibility
-							yield make_chunk({
-								"content": chunk.thoughts_delta,
-								"reasoning_content": chunk.thoughts_delta
-							})
-
-						# Handle text delta
-						if hasattr(chunk, "text_delta") and chunk.text_delta:
-							# Close thinking tag before first text content
-							if thinking_started and not thinking_ended:
-								thinking_ended = True
-								yield make_chunk({"content": "\n</think>\n\n"})
-							
-							text_buffer += chunk.text_delta
-							safe_to_yield = False
-							
-							# Yield if buffer ends with whitespace and looks like it's outside a markdown link
-							if text_buffer[-1].isspace() and text_buffer.count('[') == text_buffer.count(']') and text_buffer.count('(') == text_buffer.count(')'):
-								safe_to_yield = True
-							elif len(text_buffer) > 500:
-								safe_to_yield = True
-							
-							if safe_to_yield:
-								yield make_chunk({"content": postprocess_text(text_buffer)})
-								text_buffer = ""
-
-						# Handle inline images as they arrive
-						if hasattr(chunk, "images") and chunk.images and len(chunk.images) > yielded_images:
-							# Close thinking tag if an image arrives before any text
-							if thinking_started and not thinking_ended:
-								thinking_ended = True
-								yield make_chunk({"content": "\n</think>\n\n"})
-
-							new_images = chunk.images[yielded_images:]
-							for img in new_images:
-								img_url = getattr(img, "url", None)
-								if img_url:
-									sig = get_image_signature(img_url)
-									proxy_url = f"{base_url}/gemini-proxy/image?url={quote(img_url)}&sig={sig}"
-									img_md = f"\n\n![🎨 Loading image...]({proxy_url})\n\n"
-									yield make_chunk({"content": img_md})
-							yielded_images = len(chunk.images)
-
-					# Flush any remaining text
-					if text_buffer:
-						yield make_chunk({"content": postprocess_text(text_buffer)})
-
-					# Close thinking tag if it was never closed
-					if thinking_started and not thinking_ended:
-						yield make_chunk({"content": "\n</think>\n\n"})
-
-					# Send finish chunk
-					yield make_chunk({}, finish_reason="stop")
-					yield "data: [DONE]\n\n"
-
-					logger.info("Streaming response completed")
-				except Exception as e:
-					logger.error(f"Error during streaming: {str(e)}", exc_info=True)
-					# Send error as a content chunk so the client sees it
-					error_msg = "\n\n[An internal error occurred while streaming]"
-					yield make_chunk({"content": error_msg})
-					yield make_chunk({}, finish_reason="stop")
-					yield "data: [DONE]\n\n"
 				finally:
-					# Create background task to delete the chat if AUTO_DELETE_CHAT is enabled
-					if AUTO_DELETE_CHAT and captured_cid:
-						asyncio.create_task(background_delete_chat(gemini_client, captured_cid))
-
 					# 清理临时文件
 					for temp_file in temp_files:
 						try:
 							os.unlink(temp_file)
 						except Exception as e:
 							logger.warning(f"Failed to delete temp file {temp_file}: {str(e)}")
-
-			return StreamingResponse(generate_stream(), media_type="text/event-stream")
-		else:
-			# Non-streaming response
-			logger.info("Sending request to Gemini...")
-			try:
-				response = await gemini_client.generate_content(conversation, **gen_kwargs)
-				
-				if AUTO_DELETE_CHAT and hasattr(response, "metadata") and response.metadata and len(response.metadata) > 0:
-					cid = response.metadata[0]
-					asyncio.create_task(background_delete_chat(gemini_client, cid))
-
-			finally:
-				# 清理临时文件
-				for temp_file in temp_files:
-					try:
-						os.unlink(temp_file)
-					except Exception as e:
-						logger.warning(f"Failed to delete temp file {temp_file}: {str(e)}")
 
 			# 提取文本响应
 			reply_text = ""
@@ -665,7 +719,7 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
 				reply_text += str(response)
 
 			# 提取并追加图片响应
-			reply_text += extract_image_markdown(response, base_url)
+			reply_text += extract_image_markdown(response, base_url, account_idx=client_idx)
 			reply_text = postprocess_text(reply_text)
 
 			logger.info(f"Response: {reply_text}")
@@ -696,10 +750,11 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
 
 
 @app.get("/gemini-proxy/image")
-async def proxy_image(url: str, sig: str):
+async def proxy_image(url: str, sig: str, account: int = 0):
 	"""
 	Proxy images from Google domains to bypass browser security policies.
-	Requires a valid HMAC signature.
+	Requires a valid HMAC signature. The `account` parameter selects which
+	account's cookies to use for fetching (defaults to first account).
 	"""
 	# Verify signature
 	expected_sig = get_image_signature(url)
@@ -742,12 +797,17 @@ async def proxy_image(url: str, sig: str):
 	# 10MB limit
 	MAX_BYTES = 10 * 1024 * 1024
 
-	# Use scoped cookies to prevent leakage during redirects
+	# Use cookies from the specified account (clamp to valid range)
+	account_idx = max(0, min(account, len(cookie_entries) - 1)) if cookie_entries else 0
+	entry = cookie_entries[account_idx] if cookie_entries else {}
+	psid = entry.get("__Secure-1PSID", "")
+	psidts = entry.get("__Secure-1PSIDTS", "")
+
 	jar = httpx.Cookies()
-	jar.set("__Secure-1PSID", SECURE_1PSID, domain=".google.com")
-	jar.set("__Secure-1PSIDTS", SECURE_1PSIDTS, domain=".google.com")
-	jar.set("__Secure-1PSID", SECURE_1PSID, domain=".googleusercontent.com")
-	jar.set("__Secure-1PSIDTS", SECURE_1PSIDTS, domain=".googleusercontent.com")
+	jar.set("__Secure-1PSID", psid, domain=".google.com")
+	jar.set("__Secure-1PSIDTS", psidts, domain=".google.com")
+	jar.set("__Secure-1PSID", psid, domain=".googleusercontent.com")
+	jar.set("__Secure-1PSIDTS", psidts, domain=".googleusercontent.com")
 
 	async with httpx.AsyncClient(http2=True, cookies=jar, follow_redirects=True) as client:
 		try:

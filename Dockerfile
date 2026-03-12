@@ -2,6 +2,12 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 WORKDIR /app
 
+# Build-time proxy support (pass via --build-arg if needed)
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ENV HTTP_PROXY=${HTTP_PROXY}
+ENV HTTPS_PROXY=${HTTPS_PROXY}
+
 # Install dependencies
 COPY pyproject.toml .
 RUN uv sync
