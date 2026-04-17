@@ -15,7 +15,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 from urllib.parse import quote, urlparse
 
 import httpx
@@ -411,6 +411,8 @@ class Message(BaseModel):
 	role: str
 	content: Union[str, List[ContentItem]]
 	name: Optional[str] = None
+	tool_calls: Optional[List[Dict[str, Any]]] = None
+	tool_call_id: Optional[str] = None
 
 
 class ChatCompletionRequest(BaseModel):
@@ -424,6 +426,10 @@ class ChatCompletionRequest(BaseModel):
 	presence_penalty: Optional[float] = 0
 	frequency_penalty: Optional[float] = 0
 	user: Optional[str] = None
+	tools: Optional[List[Dict[str, Any]]] = None
+	tool_choice: Optional[Union[str, Dict[str, Any]]] = None
+	parallel_tool_calls: Optional[bool] = True
+	response_format: Optional[Dict[str, Any]] = None
 
 
 class Choice(BaseModel):
@@ -600,7 +606,14 @@ def prepare_conversation(messages: List[Message]) -> tuple:
 			elif msg.role == "user":
 				conversation += f"Human: {msg.content}\n\n"
 			elif msg.role == "assistant":
-				conversation += f"Assistant: {msg.content}\n\n"
+				conversation += f"Assistant: {msg.content}\n"
+				if msg.tool_calls:
+					conversation += f"Assistant requested tools: {json.dumps(msg.tool_calls, ensure_ascii=False)}\n"
+				conversation += "\n"
+			elif msg.role == "tool":
+				tool_name = msg.name or "tool"
+				call_id_suffix = f", tool_call_id={msg.tool_call_id}" if msg.tool_call_id else ""
+				conversation += f"Tool ({tool_name}{call_id_suffix}) result: {msg.content}\n\n"
 		else:
 			# Mixed content handling
 			if msg.role == "user":
@@ -609,6 +622,9 @@ def prepare_conversation(messages: List[Message]) -> tuple:
 				conversation += "System: "
 			elif msg.role == "assistant":
 				conversation += "Assistant: "
+			elif msg.role == "tool":
+				call_id_suffix = f", tool_call_id={msg.tool_call_id}" if msg.tool_call_id else ""
+				conversation += f"Tool ({msg.name or 'tool'}{call_id_suffix}) result: "
 
 			for item in msg.content:
 				if item.type == "text":
@@ -630,12 +646,144 @@ def prepare_conversation(messages: List[Message]) -> tuple:
 						except Exception as e:
 							logger.error(f"Error processing base64 image: {str(e)}")
 
-			conversation += "\n\n"
+				conversation += "\n\n"
+
+			if msg.role == "assistant" and msg.tool_calls:
+				conversation += f"Assistant requested tools: {json.dumps(msg.tool_calls, ensure_ascii=False)}\n\n"
 
 	# Add a final prompt for the assistant to respond to
 	conversation += "Assistant: "
 
 	return conversation, temp_files
+
+
+def normalize_tool_choice(tool_choice: Union[str, Dict[str, Any], None]) -> Dict[str, Any]:
+	if tool_choice is None:
+		return {"type": "auto"}
+	if isinstance(tool_choice, str):
+		if tool_choice in {"auto", "none", "required"}:
+			return {"type": tool_choice}
+		return {"type": "tool", "name": tool_choice}
+	if isinstance(tool_choice, dict):
+		if tool_choice.get("type") == "function" and isinstance(tool_choice.get("function"), dict):
+			function_name = tool_choice["function"].get("name")
+			if function_name:
+				return {"type": "tool", "name": function_name}
+		return tool_choice
+	return {"type": "auto"}
+
+
+def build_tool_prompt(base_conversation: str, tools: List[Dict[str, Any]], tool_choice: Dict[str, Any]) -> str:
+	tool_specs = []
+	for tool in tools:
+		fn = tool.get("function") if tool.get("type") == "function" else tool
+		if not isinstance(fn, dict) or not fn.get("name"):
+			continue
+		tool_specs.append(
+			{
+				"name": fn["name"],
+				"description": fn.get("description", ""),
+				"parameters": fn.get("parameters", {"type": "object", "properties": {}}),
+			}
+		)
+
+	tool_protocol = {
+		"tool_calls": [
+			{
+				"id": "call_123",
+				"type": "function",
+				"function": {
+					"name": "tool_name",
+					"arguments": {"arg_name": "value"},
+				},
+			}
+		],
+		"assistant_text": "optional plain language text if no tool call is needed",
+	}
+
+	choice_text = "You may either answer normally or call a tool."
+	if tool_choice.get("type") == "required":
+		choice_text = "You must call exactly one tool and must not answer normally."
+	elif tool_choice.get("type") == "none":
+		choice_text = "You must not call any tool and must answer normally."
+	elif tool_choice.get("type") == "tool" and tool_choice.get("name"):
+		choice_text = f"You must call exactly this tool: {tool_choice['name']}."
+
+	return (
+		f"{base_conversation}\n\n"
+		"System: You are operating in OpenAI function-calling compatibility mode.\n"
+		f"{choice_text}\n"
+		"Available tools JSON:\n"
+		f"{json.dumps(tool_specs, ensure_ascii=False)}\n\n"
+		"Return ONLY valid JSON and no markdown fences.\n"
+		"Use this exact schema:\n"
+		f"{json.dumps(tool_protocol, ensure_ascii=False)}\n"
+		"If you call a tool, set assistant_text to an empty string.\n"
+		"If you do not call a tool, return tool_calls as an empty array and put the answer in assistant_text.\n\n"
+		"Assistant: "
+	)
+
+
+def extract_json_object(text: str) -> Dict[str, Any] | None:
+	if not text:
+		return None
+
+	candidates = [text.strip()]
+	fence_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
+	if fence_match:
+		candidates.insert(0, fence_match.group(1).strip())
+
+	start = text.find("{")
+	end = text.rfind("}")
+	if start != -1 and end != -1 and end > start:
+		candidates.append(text[start : end + 1].strip())
+
+	for candidate in candidates:
+		try:
+			parsed = json.loads(candidate)
+			if isinstance(parsed, dict):
+				return parsed
+		except Exception:
+			continue
+	return None
+
+
+def normalize_tool_calls_from_text(reply_text: str) -> tuple[list[dict[str, Any]], str, bool]:
+	parsed = extract_json_object(reply_text)
+	if not parsed:
+		return [], reply_text, False
+
+	raw_tool_calls = parsed.get("tool_calls")
+	assistant_text = parsed.get("assistant_text", "")
+	if not isinstance(assistant_text, str):
+		assistant_text = json.dumps(assistant_text, ensure_ascii=False)
+
+	tool_calls: list[dict[str, Any]] = []
+	if isinstance(raw_tool_calls, list):
+		for item in raw_tool_calls:
+			if not isinstance(item, dict):
+				continue
+			function = item.get("function") or {}
+			name = function.get("name")
+			arguments = function.get("arguments", {})
+			if not name:
+				continue
+			if not isinstance(arguments, str):
+				arguments = json.dumps(arguments, ensure_ascii=False)
+			tool_calls.append(
+				{
+					"id": item.get("id") or f"call_{uuid.uuid4().hex[:24]}",
+					"type": "function",
+					"function": {
+						"name": name,
+						"arguments": arguments,
+					},
+				}
+			)
+
+	if tool_calls:
+		return tool_calls, assistant_text, True
+	return [], assistant_text or reply_text, True
 
 
 # Dependency to get the initialized Gemini client
@@ -755,11 +903,12 @@ async def create_chat_completion(
 		# 转换消息为对话格式
 		conversation, temp_files = prepare_conversation(request.messages)
 		logger.info(
-			"Chat completion request: stream=%s requested_model=%s messages=%s temp_files=%s",
+			"Chat completion request: stream=%s requested_model=%s messages=%s temp_files=%s tools=%s",
 			request.stream,
 			request.model,
 			len(request.messages),
 			len(temp_files),
+			len(request.tools or []),
 		)
 
 		# 获取适当的模型
@@ -776,6 +925,11 @@ async def create_chat_completion(
 			gen_kwargs["temporary"] = True
 		if temp_files:
 			gen_kwargs["files"] = temp_files
+
+		tool_choice = normalize_tool_choice(request.tool_choice)
+		tool_mode = bool(request.tools)
+		if tool_mode:
+			conversation = build_tool_prompt(conversation, request.tools or [], tool_choice)
 
 		if request.stream:
 			# Real streaming using upstream generate_content_stream
@@ -803,8 +957,8 @@ async def create_chat_completion(
 							+ "\n\n"
 						)
 
-					# Send initial role chunk
-					yield make_chunk({"role": "assistant"})
+						# Send initial role chunk
+						yield make_chunk({"role": "assistant"})
 
 					thinking_started = False
 					thinking_ended = False
@@ -879,14 +1033,44 @@ async def create_chat_completion(
 
 					# Flush any remaining text
 					if text_buffer:
-						yield make_chunk({"content": postprocess_text(text_buffer)})
+						text_buffer = postprocess_text(text_buffer)
 
 					# Close thinking tag if it was never closed
 					if thinking_started and not thinking_ended:
-						yield make_chunk({"content": "\n</think>\n\n"})
+						text_buffer += "\n</think>\n\n"
 
-					# Send finish chunk
-					yield make_chunk({}, finish_reason="stop")
+					if tool_mode:
+						tool_calls, assistant_text, parsed_envelope = normalize_tool_calls_from_text(text_buffer)
+						if tool_calls:
+							for idx, tool_call in enumerate(tool_calls):
+								yield make_chunk(
+									{
+										"tool_calls": [
+											{
+												"index": idx,
+												"id": tool_call["id"],
+												"type": "function",
+												"function": {
+													"name": tool_call["function"]["name"],
+													"arguments": tool_call["function"]["arguments"],
+												},
+											}
+										]
+									},
+									finish_reason=None,
+								)
+							yield make_chunk({}, finish_reason="tool_calls")
+						else:
+							if parsed_envelope:
+								text_buffer = assistant_text
+							if assistant_text:
+								yield make_chunk({"content": assistant_text})
+							yield make_chunk({}, finish_reason="stop")
+					else:
+						if text_buffer:
+							yield make_chunk({"content": text_buffer})
+						yield make_chunk({}, finish_reason="stop")
+
 					yield "data: [DONE]\n\n"
 
 					logger.info(
@@ -954,6 +1138,19 @@ async def create_chat_completion(
 				logger.warning("Empty response received from Gemini")
 				reply_text = "Server returned an empty response. Please check that Gemini API credentials are valid."
 
+			tool_calls = []
+			finish_reason = "stop"
+			if tool_mode:
+				tool_calls, assistant_text, parsed_envelope = normalize_tool_calls_from_text(reply_text)
+				if parsed_envelope:
+					reply_text = assistant_text
+				if tool_calls:
+					finish_reason = "tool_calls"
+
+			message_payload: dict[str, Any] = {"role": "assistant", "content": reply_text}
+			if tool_calls:
+				message_payload["tool_calls"] = tool_calls
+
 			result = {
 				"id": completion_id,
 				"object": "chat.completion",
@@ -962,8 +1159,8 @@ async def create_chat_completion(
 				"choices": [
 					{
 						"index": 0,
-						"message": {"role": "assistant", "content": reply_text},
-						"finish_reason": "stop",
+						"message": message_payload,
+						"finish_reason": finish_reason,
 					}
 				],
 				"usage": {
