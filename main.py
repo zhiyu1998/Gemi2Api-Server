@@ -573,50 +573,23 @@ async def list_models():
 
 # Helper to convert between Gemini and OpenAI model names
 def map_model_name(openai_model_name: str) -> Model:
-	"""根据模型名称字符串查找匹配的 Model 枚举值"""
-	normalized_openai_model_name = openai_model_name.lower()
+	"""根据模型名称字符串查找匹配的 Model 枚举值。
 
-	# 首先尝试直接查找匹配的模型名称
+	只走 from gemini_webapi.constants import Model，不做任何兼容：
+	  精确匹配 Model 枚举的 model_name（大小写不敏感），找不到则返回第一个非 UNSPECIFIED 模型。
+	"""
+	normalized = openai_model_name.lower()
+
+	# 精确匹配 Model 枚举
 	for m in Model:
 		model_name = m.model_name if hasattr(m, "model_name") else str(m)
-		if normalized_openai_model_name in model_name.lower():
+		if normalized == model_name.lower():
 			return m
 
-	# 如果找不到匹配项，使用默认映射（兼容旧版和新版模型名称）
-	model_keywords = {
-		"gemini-3-pro": ["3.0", "pro"],
-		"gemini-3-flash": ["3.0", "flash"],
-		"gemini-pro": ["pro", "2.0"],
-		"gemini-pro-vision": ["vision", "pro"],
-		"gemini-flash": ["flash", "2.0"],
-		"gemini-1.5-pro": ["1.5", "pro"],
-		"gemini-1.5-flash": ["1.5", "flash"],
-	}
-
-	# 根据关键词模糊匹配
-	keywords = None
-	for key, candidate_keywords in model_keywords.items():
-		normalized_key = key.lower()
-		matches_key = normalized_key in normalized_openai_model_name
-		matches_any_kw = any(kw.lower() in normalized_openai_model_name for kw in candidate_keywords)
-		if matches_key or matches_any_kw:
-			keywords = candidate_keywords
-			break
-
-	if keywords is None:
-		if "flash" in normalized_openai_model_name:
-			keywords = ["flash"]
-		elif "vision" in normalized_openai_model_name:
-			keywords = ["vision"]
-		else:
-			keywords = ["pro"]
-
+	# 找不到精确匹配，返回第一个非 UNSPECIFIED 的模型
 	for m in Model:
-		model_name = m.model_name if hasattr(m, "model_name") else str(m)
-		if all(kw.lower() in model_name.lower() for kw in keywords):
+		if m is not Model.UNSPECIFIED:
 			return m
-
-	# 如果还是找不到，返回第一个模型
 	return next(iter(Model))
 
 

@@ -13,13 +13,18 @@
             min-height: 100vh;
         }
         .header {
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            background: linear-gradient(135deg, rgba(26, 26, 46, 0.72) 0%, rgba(22, 33, 62, 0.72) 100%);
+            backdrop-filter: blur(14px) saturate(140%);
+            -webkit-backdrop-filter: blur(14px) saturate(140%);
             padding: 16px 30px;
-            border-bottom: 1px solid #333;
+            border-bottom: 1px solid rgba(79, 195, 247, 0.12);
+            box-shadow: 0 1px 0 rgba(79, 195, 247, 0.08), 0 8px 24px rgba(0, 0, 0, 0.35);
             display: flex;
             justify-content: center;
             align-items: center;
-            position: relative;
+            position: sticky;
+            top: 0;
+            z-index: 100;
         }
         .header-left {
             display: flex;
@@ -75,28 +80,63 @@
             margin-bottom: 20px;
         }
         .card {
-            background: #1a1a1a;
-            border-radius: 12px;
-            padding: 20px;
-            border: 1px solid #333;
+            background: linear-gradient(145deg, #1d1d1d 0%, #161616 100%);
+            border-radius: 14px;
+            padding: 22px;
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.03);
+            transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
+        }
+        .card:hover {
+            transform: translateY(-3px);
+            border-color: rgba(79, 195, 247, 0.25);
+            box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(79, 195, 247, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.05);
         }
         .card h3 {
             color: #4fc3f7;
             margin-bottom: 15px;
-            font-size: 16px;
+            font-size: 15px;
+            font-weight: 600;
+            letter-spacing: 0.3px;
             display: flex;
             align-items: center;
             gap: 8px;
         }
+        /* 状态统计卡片：顶部彩色高光条 + 右上角微弱辉光，通过 --accent 控制主题色 */
+        .card-stat {
+            position: relative;
+            overflow: hidden;
+        }
+        .card-stat::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 3px;
+            background: var(--accent, #4fc3f7);
+            box-shadow: 0 0 12px var(--accent, #4fc3f7);
+            opacity: 0.85;
+        }
+        .card-stat::after {
+            content: '';
+            position: absolute;
+            top: -40px; right: -40px;
+            width: 120px; height: 120px;
+            background: radial-gradient(circle, var(--accent, #4fc3f7) 0%, transparent 70%);
+            opacity: 0.08;
+            pointer-events: none;
+        }
         .stat-value {
-            font-size: 32px;
-            font-weight: bold;
+            font-size: 34px;
+            font-weight: 700;
             color: #fff;
+            font-variant-numeric: tabular-nums;
+            letter-spacing: -0.5px;
+            transition: color 0.3s ease;
         }
         .stat-label {
             color: #888;
-            font-size: 14px;
-            margin-top: 5px;
+            font-size: 13px;
+            margin-top: 6px;
         }
         .config-item {
             display: flex;
@@ -158,6 +198,20 @@
             color: #fff;
         }
         .btn-success:hover { background: #388e3c; }
+        /* 幽灵按钮：透明背景 + 主题色边框，用于标题栏内嵌操作 */
+        .btn-ghost {
+            background: transparent;
+            color: #4fc3f7;
+            border: 1px solid rgba(79, 195, 247, 0.4);
+            padding: 5px 12px;
+            font-size: 13px;
+            border-radius: 6px;
+        }
+        .btn-ghost:hover {
+            background: rgba(79, 195, 247, 0.1);
+            border-color: #4fc3f7;
+            box-shadow: 0 0 10px rgba(79, 195, 247, 0.2);
+        }
         .input-group {
             display: flex;
             gap: 10px;
@@ -308,6 +362,22 @@
             margin-bottom: 20px;
             color: #ffb74d;
         }
+        /* 全局输入框聚焦发光：覆盖所有 input/textarea/select（含内联样式） */
+        input:not([type="checkbox"]):focus,
+        textarea:focus,
+        select:focus {
+            outline: none !important;
+            border-color: #4fc3f7 !important;
+            box-shadow: 0 0 0 3px rgba(79, 195, 247, 0.18),
+                        0 0 14px rgba(79, 195, 247, 0.25) !important;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+        /* 输入框默认也加上 transition，聚焦/失焦过渡更顺滑 */
+        input:not([type="checkbox"]),
+        textarea,
+        select {
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+        }
     </style>
 </head>
 <body>
@@ -355,22 +425,22 @@
     <div class="container" id="mainPage">
         <!-- 状态卡片 -->
         <div class="grid">
-            <div class="card">
+            <div class="card card-stat" style="--accent: #4fc3f7;">
                 <h3>📊 服务状态</h3>
                 <div class="stat-value" id="uptime">--</div>
                 <div class="stat-label">运行时间</div>
             </div>
-            <div class="card">
+            <div class="card card-stat" style="--accent: #ab47bc;">
                 <h3>📈 请求统计</h3>
                 <div class="stat-value" id="totalRequests">0</div>
                 <div class="stat-label">总请求数</div>
             </div>
-            <div class="card">
+            <div class="card card-stat" style="--accent: #26c6da;">
                 <h3>⏱️ 平均响应</h3>
                 <div class="stat-value" id="avgResponseTime">--ms</div>
                 <div class="stat-label">响应时间</div>
             </div>
-            <div class="card">
+            <div class="card card-stat" style="--accent: #ef5350;">
                 <h3>🎯 错误率</h3>
                 <div class="stat-value" id="errorRate">0%</div>
                 <div class="stat-label">请求错误率</div>
@@ -380,7 +450,10 @@
         <!-- 配置管理 -->
         <div class="grid">
             <div class="card">
-                <h3>⚙️ 服务配置</h3>
+                <h3>
+                    ⚙️ 服务配置
+                    <button class="btn btn-ghost" style="margin-left: auto;" onclick="showEditConfig()">修改配置</button>
+                </h3>
                 <div class="config-item">
                     <span class="config-label">监听地址</span>
                     <span class="config-value" id="currentHost">--</span>
@@ -397,18 +470,19 @@
                     <span class="config-label">Cookie 状态</span>
                     <span class="config-value" id="cookieStatus">--</span>
                 </div>
-                <button class="btn btn-primary" onclick="showEditConfig()">修改配置</button>
             </div>
 
             <div class="card">
-                <h3>🍪 Gemini Cookie 配置</h3>
+                <h3>
+                    🍪 Gemini Cookie 配置
+                    <button class="btn btn-ghost" style="margin-left: auto;" onclick="saveCookiesAndReinit()">保存并重新连接</button>
+                </h3>
                 <div class="warning">
                     💡 登录 <a href="https://gemini.google.com/" target="_blank" rel="noopener noreferrer" style="color: #4fc3f7;">gemini.google.com</a>，F12 → Application → Cookies 复制以下两个值。
                 </div>
                 <div class="form-group">
-                    <label>一键粘贴（从浏览器复制的整段 Cookie，自动提取）</label>
-                    <textarea id="cookieRaw" rows="3" placeholder="粘贴整段 Cookie，例如：__Secure-1PSID=xxx; __Secure-1PSIDTS=yyy; ..." style="width: 100%; padding: 10px; background: #2a2a2a; border: 1px solid #444; border-radius: 6px; color: #fff; font-family: monospace; font-size: 12px; resize: vertical;" oninput="parseRawCookie()"></textarea>
-                    <button class="btn btn-primary" style="margin-top: 8px;" onclick="parseRawCookie(true)">🔍 提取 Cookie</button>
+                    <label>一键粘贴（从浏览器复制的整段 Cookie，粘贴后自动提取）</label>
+                    <textarea id="cookieRaw" rows="3" placeholder="粘贴整段 Cookie，例如：__Secure-1PSID=xxx; __Secure-1PSIDTS=yyy; ..." style="width: 100%; padding: 10px; background: #2a2a2a; border: 1px solid #444; border-radius: 6px; color: #fff; font-family: monospace; font-size: 12px; resize: vertical;"></textarea>
                 </div>
                 <div class="form-group">
                     <label>__Secure-1PSID</label>
@@ -417,9 +491,6 @@
                 <div class="form-group">
                     <label>__Secure-1PSIDTS</label>
                     <input type="text" id="cookie1psidts" placeholder="粘贴 __Secure-1PSIDTS 的值" style="font-family: monospace; font-size: 12px;">
-                </div>
-                <div style="display: flex; gap: 10px; margin-top: 10px;">
-                    <button class="btn btn-success" onclick="saveCookiesAndReinit()">💾 保存并重新连接 Gemini</button>
                 </div>
                 <div id="cookieMessage" style="margin-top: 10px; display: none; padding: 10px; border-radius: 6px;"></div>
             </div>
@@ -463,11 +534,13 @@
         <!-- 日志和测试 -->
         <div class="grid">
             <div class="card">
-                <h3>📝 最近日志</h3>
+                <h3>
+                    📝 最近日志
+                    <button class="btn btn-ghost" style="margin-left: auto;" onclick="refreshLogs()">刷新</button>
+                </h3>
                 <div class="log-container" id="logContainer">
                     <div style="color: #666;">暂无日志</div>
                 </div>
-                <button class="btn btn-primary" style="margin-top: 10px;" onclick="refreshLogs()">刷新</button>
             </div>
 
             <div class="card">
@@ -635,7 +708,12 @@
                 document.getElementById('uptime').textContent = data.uptime || '--';
                 document.getElementById('totalRequests').textContent = data.total_requests || 0;
                 document.getElementById('avgResponseTime').textContent = (data.avg_response_time || 0) + 'ms';
-                document.getElementById('errorRate').textContent = (data.error_rate || 0).toFixed(1) + '%';
+
+                // 错误率按健康度动态变色：0% 绿 / 1-5% 黄 / >5% 红
+                const errRate = (data.error_rate || 0);
+                const errEl = document.getElementById('errorRate');
+                errEl.textContent = errRate.toFixed(1) + '%';
+                errEl.style.color = errRate === 0 ? '#66bb6a' : errRate <= 5 ? '#ffa726' : '#ef5350';
                 
                 document.getElementById('currentHost').textContent = data.host || '--';
                 document.getElementById('currentPort').textContent = data.port || '--';
@@ -826,17 +904,32 @@
         }
 
         // 从整段 Cookie 字符串中提取 __Secure-1PSID 和 __Secure-1PSIDTS
+        // 防抖计时器，避免每次按键都触发提取
+        let _cookieParseTimer = null;
+        function autoParseRawCookie() {
+            if (_cookieParseTimer) clearTimeout(_cookieParseTimer);
+            _cookieParseTimer = setTimeout(() => {
+                parseRawCookie(true);
+                _cookieParseTimer = null;
+            }, 300);
+        }
+
+        // 页面加载后给 textarea 绑定自动提取（input + paste 都覆盖）
+        document.addEventListener('DOMContentLoaded', () => {
+            const raw = document.getElementById('cookieRaw');
+            if (raw) raw.addEventListener('input', autoParseRawCookie);
+        });
+
         function parseRawCookie(showMessage = false) {
             const raw = document.getElementById('cookieRaw').value.trim();
             const msgEl = document.getElementById('cookieMessage');
-            
+
+            // 输入框为空：清空下方输入框并隐藏提示，避免残留误导
             if (!raw) {
-                if (showMessage) {
-                    msgEl.style.display = 'block';
-                    msgEl.style.background = '#3a2a1a';
-                    msgEl.style.color = '#ffb74d';
-                    msgEl.textContent = '⚠️ 请先粘贴 Cookie 字符串';
-                }
+                document.getElementById('cookie1psid').value = '';
+                document.getElementById('cookie1psidts').value = '';
+                msgEl.style.display = 'none';
+                msgEl.textContent = '';
                 return;
             }
             

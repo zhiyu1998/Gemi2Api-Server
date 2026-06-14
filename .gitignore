@@ -1,6 +1,7 @@
 .python-version
 .idea
 .venv
+.vscode
 uv.lock
 .env
 __pycache__
@@ -8,3 +9,7 @@ __pycache__
 .ruff_cache
 
 secrets/
+
+# 本地开发脚本产物
+.dev-logs/
+dev.ps1
