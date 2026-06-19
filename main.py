@@ -27,7 +27,7 @@ import httpx
 import numpy as np
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from gemini_webapi import GeminiClient, set_log_level
 from gemini_webapi.constants import Model
 from PIL import Image
@@ -161,6 +161,7 @@ PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 SECRET_FILE_PATH = os.path.join(os.path.dirname(__file__), "secrets", "proxy_secret")
 GEMINI_COOKIE_PATH = os.path.join(os.path.dirname(__file__), "secrets")
 SESSION_VALIDATION_PROMPT = "Reply with exactly OK."
+GEM_ID = os.environ.get("GEM_ID", "")
 AUTH_FAILURE_TEXT_PATTERNS = (
 	"are you signed in",
 	"sign in",
@@ -594,11 +595,15 @@ def map_model_name(openai_model_name: str) -> Model:
 
 
 # Prepare conversation history from OpenAI messages format
-def prepare_conversation(messages: List[Message]) -> tuple:
+def prepare_conversation(messages: List[Message], skip_system: bool = False) -> tuple:
 	"""
 	Convert a list of OpenAI-formatted message objects into a
 	flat string conversation format suitable for the Gemini API.
 	Also extracts and saves base64 images to temporary files.
+
+	Args:
+		skip_system: 当启用 Gemini Gem 时传 True，跳过 system 消息拼接，
+			避免与 Gem 的 system prompt 重复冲突。
 
 	Returns:
 		A tuple containing the constructed conversation string and a list of paths to temporary image files.
@@ -607,6 +612,9 @@ def prepare_conversation(messages: List[Message]) -> tuple:
 	temp_files = []
 
 	for msg in messages:
+		# 启用 Gem 时跳过 system 消息（Gem 本身就是 system prompt 通道）
+		if skip_system and msg.role == "system":
+			continue
 		if isinstance(msg.content, str):
 			# String content handling
 			if msg.role == "system":
@@ -766,8 +774,8 @@ async def create_chat_completion(
 		global gemini_client
 		gemini_client = await get_gemini_client()
 
-		# 转换消息为对话格式
-		conversation, temp_files = prepare_conversation(request.messages)
+		# 转换消息为对话格式（启用 Gem 时跳过 system 消息）
+		conversation, temp_files = prepare_conversation(request.messages, skip_system=bool(GEM_ID))
 		logger.info(
 			"Chat completion request: stream=%s requested_model=%s messages=%s temp_files=%s",
 			request.stream,
@@ -790,6 +798,8 @@ async def create_chat_completion(
 			gen_kwargs["temporary"] = True
 		if temp_files:
 			gen_kwargs["files"] = temp_files
+		if GEM_ID:
+			gen_kwargs["gem"] = GEM_ID
 
 		if request.stream:
 			# Real streaming using upstream generate_content_stream
@@ -1110,10 +1120,8 @@ async def proxy_image(url: str, sig: str):
 
 @app.get("/")
 async def root():
-	"""
-	Health check endpoint to verify the API server is currently running.
-	"""
-	return {"status": "online", "message": "Gemini API FastAPI Server is running"}
+	"""根路径直接跳转到管理面板。"""
+	return RedirectResponse(url="/admin", status_code=307)
 
 
 if __name__ == "__main__":

@@ -61,6 +61,7 @@ class ConfigUpdate(BaseModel):
 	host: Optional[str] = None
 	port: Optional[int] = None
 	api_key: Optional[str] = None
+	gem_id: Optional[str] = None
 	feature: Optional[str] = None
 	enabled: Optional[bool] = None
 
@@ -205,7 +206,7 @@ async def verify_admin_token(request: Request):
 @router.get("/api/status")
 async def get_status(token: str = Depends(verify_admin_token)):
 	"""获取服务状态"""
-	from main import API_KEY, AUTO_DELETE_CHAT, ENABLE_THINKING, HOST, PORT, SECURE_1PSID, SECURE_1PSIDTS, TEMPORARY_CHAT
+	from main import API_KEY, AUTO_DELETE_CHAT, ENABLE_THINKING, GEM_ID, HOST, PORT, SECURE_1PSID, SECURE_1PSIDTS, TEMPORARY_CHAT
 
 	# 检查 cookie 是否有效（简单检查是否存在）
 	cookie_valid = bool(SECURE_1PSID and SECURE_1PSIDTS)
@@ -235,6 +236,7 @@ async def get_status(token: str = Depends(verify_admin_token)):
 		"thinking_enabled": ENABLE_THINKING,
 		"temporary_chat": TEMPORARY_CHAT,
 		"auto_delete_chat": AUTO_DELETE_CHAT,
+		"gem_id": GEM_ID,
 		"version": _get_version(),
 		"start_time": datetime.fromtimestamp(_start_time).strftime("%Y-%m-%d %H:%M:%S"),
 	}
@@ -308,6 +310,8 @@ async def save_config_and_restart(config: ConfigUpdate, token: str = Depends(ver
 		env_updates["PORT"] = str(config.port)
 	if config.api_key is not None:
 		env_updates["API_KEY"] = config.api_key
+	if config.gem_id is not None:
+		env_updates["GEM_ID"] = config.gem_id
 
 	if env_updates:
 		write_env(env_updates)
@@ -445,6 +449,145 @@ async def reinit_client(token: str = Depends(verify_admin_token)):
 			raise HTTPException(status_code=500, detail="客户端初始化返回空值")
 	except Exception as e:
 		raise HTTPException(status_code=500, detail=f"重新连接失败: {str(e)}")
+
+
+# ===== Gemini Gems 管理 =====
+
+
+class GemCreate(BaseModel):
+	"""创建 Gem 请求"""
+
+	name: str
+	prompt: str
+	description: str = ""
+
+
+class GemUpdate(BaseModel):
+	"""更新 Gem 请求（全量更新）"""
+
+	name: str
+	prompt: str
+	description: str = ""
+
+
+def _gem_to_dict(gem) -> dict:
+	"""把 gemini_webapi.Gem 转成可序列化的 dict"""
+	return {
+		"id": getattr(gem, "id", ""),
+		"name": getattr(gem, "name", ""),
+		"description": getattr(gem, "description", None),
+		"prompt": getattr(gem, "prompt", None),
+		"predefined": getattr(gem, "predefined", False),
+	}
+
+
+@router.get("/api/gems")
+async def list_gems(token: str = Depends(verify_admin_token)):
+	"""列出所有 Gemini Gem（预置 + 自建）"""
+	import main
+
+	try:
+		client = await main.get_gemini_client()
+		if client is None:
+			return {"success": False, "message": "Gemini 客户端未初始化", "gems": []}
+		# include_hidden=True 拿到完整列表（含隐藏预置 gem）
+		gem_jar = await client.fetch_gems(include_hidden=True)
+		gems = [_gem_to_dict(g) for g in gem_jar]
+		return {"success": True, "gems": gems, "current_gem_id": main.GEM_ID}
+	except Exception as e:
+		return {"success": False, "message": f"获取 Gem 列表失败: {str(e)}", "gems": [], "current_gem_id": getattr(main, "GEM_ID", "")}
+
+
+@router.post("/api/gems")
+async def create_gem(gem: GemCreate, token: str = Depends(verify_admin_token)):
+	"""创建新的自定义 Gem"""
+	import main
+
+	if not gem.name or not gem.prompt:
+		return {"success": False, "message": "name 和 prompt 不能为空"}
+
+	try:
+		client = await main.get_gemini_client()
+		if client is None:
+			return {"success": False, "message": "Gemini 客户端未初始化"}
+		new_gem = await client.create_gem(name=gem.name, prompt=gem.prompt, description=gem.description or "")
+		# 刷新缓存
+		await client.fetch_gems(include_hidden=True)
+		return {"success": True, "message": f"Gem '{gem.name}' 创建成功", "gem": _gem_to_dict(new_gem)}
+	except Exception as e:
+		return {"success": False, "message": f"创建 Gem 失败: {str(e)}"}
+
+
+@router.put("/api/gems/{gem_id}")
+async def update_gem(gem_id: str, gem: GemUpdate, token: str = Depends(verify_admin_token)):
+	"""更新现有的自定义 Gem（全量更新）"""
+	import main
+
+	if not gem.name or not gem.prompt:
+		return {"success": False, "message": "name 和 prompt 不能为空"}
+
+	try:
+		client = await main.get_gemini_client()
+		if client is None:
+			return {"success": False, "message": "Gemini 客户端未初始化"}
+		updated = await client.update_gem(gem=gem_id, name=gem.name, prompt=gem.prompt, description=gem.description or "")
+		# 刷新缓存（update_gem 不校验响应，靠重新 fetch 确认）
+		await client.fetch_gems(include_hidden=True)
+		return {"success": True, "message": f"Gem '{gem.name}' 更新成功", "gem": _gem_to_dict(updated)}
+	except Exception as e:
+		return {"success": False, "message": f"更新 Gem 失败: {str(e)}"}
+
+
+@router.delete("/api/gems/{gem_id}")
+async def delete_gem(gem_id: str, token: str = Depends(verify_admin_token)):
+	"""删除自定义 Gem"""
+	import main
+
+	try:
+		client = await main.get_gemini_client()
+		if client is None:
+			return {"success": False, "message": "Gemini 客户端未初始化"}
+		await client.delete_gem(gem=gem_id)
+		# 刷新缓存（delete_gem 不校验响应，靠重新 fetch 确认）
+		await client.fetch_gems(include_hidden=True)
+		# 如果删除的是当前激活的 Gem，清空 GEM_ID
+		if getattr(main, "GEM_ID", "") == gem_id:
+			write_env({"GEM_ID": ""})
+			main.GEM_ID = ""
+		return {"success": True, "message": "Gem 已删除"}
+	except Exception as e:
+		return {"success": False, "message": f"删除 Gem 失败: {str(e)}"}
+
+
+@router.post("/api/gems/{gem_id}/activate")
+async def activate_gem(gem_id: str, token: str = Depends(verify_admin_token)):
+	"""激活指定 Gem 作为全局 system prompt（写 .env + 改运行时）"""
+	import main
+
+	# 空字符串表示取消激活
+	target = gem_id if gem_id and gem_id.lower() not in ("none", "null", "0") else ""
+	try:
+		write_env({"GEM_ID": target})
+		main.GEM_ID = target
+		if target:
+			return {"success": True, "message": f"已激活 Gem: {target}", "gem_id": target}
+		else:
+			return {"success": True, "message": "已取消 Gem 激活（使用默认行为）", "gem_id": ""}
+	except Exception as e:
+		return {"success": False, "message": f"激活 Gem 失败: {str(e)}"}
+
+
+@router.post("/api/gems/deactivate")
+async def deactivate_gem(token: str = Depends(verify_admin_token)):
+	"""取消激活当前 Gem（清空 GEM_ID）"""
+	import main
+
+	try:
+		write_env({"GEM_ID": ""})
+		main.GEM_ID = ""
+		return {"success": True, "message": "已取消 Gem 激活（使用默认行为）", "gem_id": ""}
+	except Exception as e:
+		return {"success": False, "message": f"取消激活失败: {str(e)}"}
 
 
 def setup_middleware(app):

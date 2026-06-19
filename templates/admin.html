@@ -378,6 +378,105 @@
         select {
             transition: border-color 0.2s ease, box-shadow 0.2s ease;
         }
+        /* ===== Gemini Gems 管理 ===== */
+        .gem-section-label {
+            color: #888;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin: 12px 0 8px;
+        }
+        .gem-item {
+            padding: 12px;
+            background: #2a2a2a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            margin-bottom: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+            transition: border-color 0.2s ease, background 0.2s ease;
+        }
+        .gem-item:hover {
+            border-color: #444;
+            background: #303030;
+        }
+        .gem-item.active {
+            border-color: #4caf50;
+            background: rgba(76, 175, 80, 0.08);
+            box-shadow: 0 0 0 1px rgba(76, 175, 80, 0.3);
+        }
+        .gem-info { flex: 1; min-width: 0; }
+        .gem-name {
+            color: #e0e0e0;
+            font-size: 14px;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .gem-name .active-badge {
+            color: #4caf50;
+            font-size: 12px;
+        }
+        .gem-desc {
+            color: #888;
+            font-size: 12px;
+            margin-top: 3px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .gem-id {
+            color: #666;
+            font-size: 11px;
+            font-family: monospace;
+            margin-top: 2px;
+        }
+        .gem-actions { display: flex; gap: 6px; flex-shrink: 0; }
+        .gem-btn {
+            padding: 4px 10px;
+            font-size: 12px;
+            border-radius: 5px;
+            border: 1px solid #444;
+            background: #1a1a1a;
+            color: #ccc;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .gem-btn:hover { border-color: #4fc3f7; color: #4fc3f7; }
+        .gem-btn.danger:hover { border-color: #f44336; color: #f44336; }
+        .gem-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+        /* 折叠表单 */
+        .collapsible {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.3s ease;
+        }
+        .collapsible.open { max-height: 600px; }
+        .gem-empty {
+            color: #666;
+            font-size: 13px;
+            text-align: center;
+            padding: 20px;
+        }
+        .gem-more-btn-wrap { text-align: center; margin-top: 8px; }
+        .gem-more-btn {
+            display: inline-block;
+            padding: 6px 16px !important;
+            border: 1px dashed #555 !important;
+            background: transparent !important;
+            color: #aaa !important;
+            border-radius: 6px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .gem-more-btn:hover {
+            border-color: #4fc3f7 !important;
+            color: #4fc3f7 !important;
+        }
     </style>
 </head>
 <body>
@@ -523,6 +622,44 @@
             </div>
         </div>
 
+        <!-- Gemini Gems 管理 -->
+        <div class="card" style="margin-bottom: 20px;">
+            <h3>
+                💎 Gemini Gems 管理
+                <button class="btn btn-ghost" style="margin-left: auto;" onclick="fetchGems()">刷新</button>
+            </h3>
+            <div style="display: flex; gap: 10px; margin-bottom: 12px; flex-wrap: wrap;">
+                <button class="btn btn-ghost" id="gemCreateToggle" onclick="toggleGemCreateForm()">+ 创建新 Gem</button>
+            </div>
+            <!-- 创建表单（折叠） -->
+            <div class="collapsible" id="gemCreateForm">
+                <div style="padding: 12px; background: #1a1a1a; border-radius: 8px; margin-bottom: 12px; border: 1px solid #333;">
+                    <div class="form-group">
+                        <label>名称 *</label>
+                        <input type="text" id="newGemName" placeholder="例如：Python 导师">
+                    </div>
+                    <div class="form-group">
+                        <label>描述（可选）</label>
+                        <input type="text" id="newGemDesc" placeholder="一句话描述这个 Gem 的用途">
+                    </div>
+                    <div class="form-group">
+                        <label>System Prompt *</label>
+                        <textarea id="newGemPrompt" rows="4" placeholder="你是一个专业的 Python 编程导师..." style="width: 100%; padding: 10px; background: #2a2a2a; border: 1px solid #444; border-radius: 6px; color: #fff; font-family: monospace; font-size: 13px; resize: vertical;"></textarea>
+                    </div>
+                    <div style="display: flex; gap: 8px;">
+                        <button class="btn btn-primary" onclick="createGem()">创建</button>
+                        <button class="btn btn-ghost" onclick="toggleGemCreateForm()">取消</button>
+                    </div>
+                </div>
+            </div>
+            <div id="gemMessage" style="margin-bottom: 12px; display: none; padding: 10px; border-radius: 6px; font-size: 13px;"></div>
+            <input type="text" id="gemSearch" placeholder="🔍 搜索 Gem（名称 / 描述 / ID）..." style="width: 100%; padding: 10px 12px; background: #2a2a2a; border: 1px solid #444; border-radius: 8px; color: #fff; font-size: 13px; margin-bottom: 14px;" oninput="onGemSearchInput()">
+            <div class="gem-section-label">预置 Gem <span id="predefinedCount" style="color: #555; margin-left: 4px;"></span></div>
+            <div id="predefinedGems"><div class="gem-empty">加载中...</div></div>
+            <div class="gem-section-label">自建 Gem <span id="customCount" style="color: #555; margin-left: 4px;"></span></div>
+            <div id="customGems"><div class="gem-empty">加载中...</div></div>
+        </div>
+
         <!-- 模型列表 -->
         <div class="card" style="margin-bottom: 20px;">
             <h3>📋 可用模型</h3>
@@ -544,7 +681,10 @@
             </div>
 
             <div class="card">
-                <h3>💬 快速测试</h3>
+                <h3>
+                    💬 快速测试
+                    <button class="btn btn-ghost" style="margin-left: auto;" onclick="clearChatMessages()">清除对话</button>
+                </h3>
                 <div class="chat-area">
                     <div class="chat-messages" id="chatMessages">
                         <div class="chat-msg assistant">你好！我是 Gemini，有什么可以帮你的？</div>
@@ -580,9 +720,36 @@
                 <label>API_KEY（留空表示禁用鉴权）</label>
                 <input type="text" id="editApiKey" placeholder="可选">
             </div>
+            <div class="form-group">
+                <label>GEM_ID（Gemini Gem 的 ID，留空表示不启用）</label>
+                <input type="text" id="editGemId" placeholder="可选，例如 coding-partner">
+            </div>
             <div class="modal-buttons">
                 <button class="btn" style="background: #444; color: #fff;" onclick="closeModal()">取消</button>
                 <button class="btn btn-primary" onclick="saveConfigAndRestart()">💾 保存并重启服务</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Gem 编辑弹窗 -->
+    <div class="modal" id="gemEditModal">
+        <div class="modal-content">
+            <h3>编辑 Gem</h3>
+            <div class="form-group">
+                <label>名称 *</label>
+                <input type="text" id="editGemName" placeholder="Gem 名称">
+            </div>
+            <div class="form-group">
+                <label>描述（可选）</label>
+                <input type="text" id="editGemDesc" placeholder="一句话描述">
+            </div>
+            <div class="form-group">
+                <label>System Prompt *</label>
+                <textarea id="editGemPrompt" rows="6" placeholder="System prompt 内容" style="width: 100%; padding: 10px; background: #2a2a2a; border: 1px solid #444; border-radius: 6px; color: #fff; font-family: monospace; font-size: 13px; resize: vertical;"></textarea>
+            </div>
+            <div class="modal-buttons">
+                <button class="btn" style="background: #444; color: #fff;" onclick="closeGemEditModal()">取消</button>
+                <button class="btn btn-primary" onclick="saveGemEdit()">保存</button>
             </div>
         </div>
     </div>
@@ -593,6 +760,8 @@
         
         // 会话管理
         let adminToken = localStorage.getItem('adminToken') || '';
+        // 当前激活的 Gem ID（由 fetchStatus 写入，供配置弹窗/Gems 卡片使用）
+        let currentGemId = '';
         
         // 带 token 的 fetch 封装
         function authFetch(url, options = {}) {
@@ -688,6 +857,7 @@
                 fetchStatus();
                 fetchLogs();
             }, 10000);
+            fetchGems();
         }
 
         // 启动
@@ -728,7 +898,10 @@
                 document.getElementById('toggleThinking').checked = data.thinking_enabled || false;
                 document.getElementById('toggleTemporary').checked = data.temporary_chat || false;
                 document.getElementById('toggleAutoDelete').checked = data.auto_delete_chat || false;
-                
+
+                // 当前激活的 Gem ID（供配置弹窗和 Gems 卡片高亮使用）
+                currentGemId = data.gem_id || '';
+
                 // 状态指示
                 document.getElementById('statusDot').style.background = data.running ? '#4caf50' : '#f44336';
                 document.getElementById('statusText').textContent = data.running ? '运行中' : '已停止';
@@ -816,6 +989,7 @@
             fetchStatus().then(() => {
                 document.getElementById('editHost').value = document.getElementById('currentHost').textContent;
                 document.getElementById('editPort').value = document.getElementById('currentPort').textContent;
+                document.getElementById('editGemId').value = currentGemId || '';
                 document.getElementById('configModal').classList.add('active');
             });
         }
@@ -828,11 +1002,12 @@
         // 保存配置并重启服务
         async function saveConfigAndRestart() {
             if (!confirm('确定要保存配置并重启服务吗？')) return;
-            
+
             const config = {
                 host: document.getElementById('editHost').value,
                 port: parseInt(document.getElementById('editPort').value),
-                api_key: document.getElementById('editApiKey').value
+                api_key: document.getElementById('editApiKey').value,
+                gem_id: document.getElementById('editGemId').value.trim(),
             };
             
             try {
@@ -968,6 +1143,12 @@
             }
         }
 
+        // 清除测试对话（重置为欢迎语）
+        function clearChatMessages() {
+            const chatMessages = document.getElementById('chatMessages');
+            chatMessages.innerHTML = '<div class="chat-msg assistant">你好！我是 Gemini，有什么可以帮你的？</div>';
+        }
+
         // 发送测试消息
         async function sendTestMessage() {
             const input = document.getElementById('chatInput');
@@ -1026,11 +1207,350 @@
             chatMessages.scrollTop = chatMessages.scrollHeight;
         }
 
+        // ===== Gemini Gems 管理 =====
+
+        // 显示 Gem 卡片的操作提示消息
+        function showGemMessage(text, type) {
+            const msgEl = document.getElementById('gemMessage');
+            msgEl.style.display = 'block';
+            const styles = {
+                success: { bg: '#1a3a1a', color: '#4caf50' },
+                error:   { bg: '#3a1a1a', color: '#f44336' },
+                warning: { bg: '#3a2a1a', color: '#ffb74d' },
+                info:    { bg: '#1a2a3a', color: '#4fc3f7' },
+            };
+            const s = styles[type] || styles.info;
+            msgEl.style.background = s.bg;
+            msgEl.style.color = s.color;
+            msgEl.textContent = text;
+            // 成功消息 3 秒后自动消失
+            if (type === 'success') {
+                clearTimeout(window._gemMsgTimer);
+                window._gemMsgTimer = setTimeout(() => { msgEl.style.display = 'none'; }, 3000);
+            }
+        }
+
+        // 切换创建表单的展开/收起
+        function toggleGemCreateForm() {
+            const form = document.getElementById('gemCreateForm');
+            form.classList.toggle('open');
+            if (!form.classList.contains('open')) {
+                document.getElementById('newGemName').value = '';
+                document.getElementById('newGemDesc').value = '';
+                document.getElementById('newGemPrompt').value = '';
+            }
+        }
+
+        // 获取 Gem 列表
+        let allGems = [];          // 缓存后端返回的全部 Gem
+        let gemSearchTerm = '';    // 当前搜索词
+        let gemExpanded = { predefined: false, custom: false }; // 是否展开显示全部
+        const GEM_PREVIEW_COUNT = 5;
+
+        async function fetchGems() {
+            const predefinedEl = document.getElementById('predefinedGems');
+            const customEl = document.getElementById('customGems');
+            try {
+                const res = await authFetch(`${API_BASE}/gems`);
+                const data = await res.json();
+                if (!data.success) {
+                    allGems = [];
+                    predefinedEl.innerHTML = `<div class="gem-empty">${escapeHtml(data.message || '获取失败')}</div>`;
+                    customEl.innerHTML = '<div class="gem-empty"></div>';
+                    updateGemCounts();
+                    return;
+                }
+                currentGemId = data.current_gem_id || '';
+                allGems = data.gems || [];
+                // 刷新后重置展开状态（保留搜索词，方便观察过滤结果）
+                gemExpanded = { predefined: false, custom: false };
+                applyGemFilter();
+            } catch (e) {
+                allGems = [];
+                predefinedEl.innerHTML = `<div class="gem-empty">网络错误: ${escapeHtml(e.message)}</div>`;
+                customEl.innerHTML = '<div class="gem-empty"></div>';
+                updateGemCounts();
+            }
+        }
+
+        // 搜索框输入（防抖）
+        let _gemSearchTimer = null;
+        function onGemSearchInput() {
+            if (_gemSearchTimer) clearTimeout(_gemSearchTimer);
+            _gemSearchTimer = setTimeout(() => {
+                gemSearchTerm = document.getElementById('gemSearch').value.trim().toLowerCase();
+                // 搜索时自动展开（避免搜索结果被截断看不到），清空搜索时收起
+                gemExpanded = {
+                    predefined: gemSearchTerm !== '',
+                    custom: gemSearchTerm !== '',
+                };
+                applyGemFilter();
+                _gemSearchTimer = null;
+            }, 200);
+        }
+
+        // 按 gemSearchTerm 过滤
+        function filterGems(gems) {
+            if (!gemSearchTerm) return gems;
+            return gems.filter(g =>
+                (g.name || '').toLowerCase().includes(gemSearchTerm) ||
+                (g.description || '').toLowerCase().includes(gemSearchTerm) ||
+                (g.id || '').toLowerCase().includes(gemSearchTerm)
+            );
+        }
+
+        // 把已激活的 Gem 排到最前面（稳定排序，保留原顺序）
+        function sortGemsByActive(gems) {
+            return [...gems].sort((a, b) => {
+                const aActive = currentGemId && a.id === currentGemId ? 0 : 1;
+                const bActive = currentGemId && b.id === currentGemId ? 0 : 1;
+                return aActive - bActive;
+            });
+        }
+
+        // 更新 section 标签后的计数
+        function updateGemCounts(predefinedTotal, predefinedShown, customTotal, customShown) {
+            const setCount = (id, shown, total) => {
+                const el = document.getElementById(id);
+                if (!el) return;
+                el.textContent = (typeof total === 'number' && total > 0)
+                    ? `(${shown}/${total})`
+                    : '';
+            };
+            setCount('predefinedCount', predefinedShown, predefinedTotal);
+            setCount('customCount', customShown, customTotal);
+        }
+
+        // 应用搜索 + 截断，渲染两个列表
+        function applyGemFilter() {
+            const predefinedEl = document.getElementById('predefinedGems');
+            const customEl = document.getElementById('customGems');
+            const predefinedAll = sortGemsByActive(filterGems(allGems.filter(g => g.predefined)));
+            const customAll = sortGemsByActive(filterGems(allGems.filter(g => !g.predefined)));
+
+            const predefinedShown = gemExpanded.predefined ? predefinedAll : predefinedAll.slice(0, GEM_PREVIEW_COUNT);
+            const customShown = gemExpanded.custom ? customAll : customAll.slice(0, GEM_PREVIEW_COUNT);
+
+            renderGems(predefinedEl, predefinedShown, false, predefinedAll.length, () => {
+                gemExpanded.predefined = true;
+                applyGemFilter();
+            }, gemExpanded.predefined);
+            renderGems(customEl, customShown, true, customAll.length, () => {
+                gemExpanded.custom = true;
+                applyGemFilter();
+            }, gemExpanded.custom);
+
+            updateGemCounts(predefinedAll.length, predefinedShown.length, customAll.length, customShown.length);
+        }
+
+        // 渲染 Gem 列表到指定容器
+        //   gems: 待渲染的数组（已截断）
+        //   totalCount: 过滤后的总数（用于判断是否需要"展开更多"按钮）
+        //   onExpand: 展开回调
+        //   expanded: 当前是否已展开
+        function renderGems(container, gems, allowEdit, totalCount, onExpand, expanded) {
+            if (!gems || gems.length === 0) {
+                container.innerHTML = `<div class="gem-empty">${allowEdit ? '暂无自建 Gem，点击上方"创建新 Gem"添加' : (gemSearchTerm ? '没有匹配的预置 Gem' : '暂无预置 Gem')}</div>`;
+                return;
+            }
+            const html = gems.map(g => {
+                const isActive = currentGemId && g.id === currentGemId;
+                const activeBadge = isActive ? '<span class="active-badge">✓ 已激活</span>' : '';
+                const gemIdAttr = escapeAttr(g.id || '');
+                const gemNameAttr = escapeAttr(g.name || '');
+                const activateBtn = isActive
+                    ? `<button class="gem-btn gem-activate-btn" data-gem-id="">取消激活</button>`
+                    : `<button class="gem-btn gem-activate-btn" data-gem-id="${gemIdAttr}">激活</button>`;
+                const editBtn = allowEdit
+                    ? `<button class="gem-btn gem-edit-btn" data-gem-id="${gemIdAttr}">编辑</button>
+                       <button class="gem-btn danger gem-delete-btn" data-gem-id="${gemIdAttr}" data-gem-name="${gemNameAttr}">删除</button>`
+                    : '';
+                const desc = g.description ? `<div class="gem-desc">${escapeHtml(g.description)}</div>` : '';
+                return `
+                    <div class="gem-item ${isActive ? 'active' : ''}">
+                        <div class="gem-info">
+                            <div class="gem-name">${escapeHtml(g.name)} ${activeBadge}</div>
+                            ${desc}
+                            <div class="gem-id">${escapeHtml(g.id)}</div>
+                        </div>
+                        <div class="gem-actions">
+                            ${activateBtn}
+                            ${editBtn}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            // 还有更多未展示且当前未展开 → 追加"展开更多"按钮
+            let extra = '';
+            if (!expanded && totalCount > gems.length) {
+                const hidden = totalCount - gems.length;
+                extra = `<div class="gem-more-btn-wrap"><button class="gem-btn gem-more-btn" id="${allowEdit ? 'customExpand' : 'predefinedExpand'}">展开更多（还有 ${hidden} 个）</button></div>`;
+            }
+            container.innerHTML = html + extra;
+            // 绑定展开按钮
+            if (extra) {
+                const btn = container.querySelector('.gem-more-btn');
+                if (btn) btn.addEventListener('click', onExpand);
+            }
+            container.querySelectorAll('.gem-activate-btn').forEach(btn => {
+                btn.addEventListener('click', () => activateGem(btn.dataset.gemId || ''));
+            });
+            container.querySelectorAll('.gem-edit-btn').forEach(btn => {
+                btn.addEventListener('click', () => openGemEditModal(btn.dataset.gemId || ''));
+            });
+            container.querySelectorAll('.gem-delete-btn').forEach(btn => {
+                btn.addEventListener('click', () => deleteGem(btn.dataset.gemId || '', btn.dataset.gemName || ''));
+            });
+        }
+
+        // 创建 Gem
+        async function createGem() {
+            const name = document.getElementById('newGemName').value.trim();
+            const desc = document.getElementById('newGemDesc').value.trim();
+            const prompt = document.getElementById('newGemPrompt').value.trim();
+            if (!name || !prompt) {
+                showGemMessage('名称和 System Prompt 不能为空', 'error');
+                return;
+            }
+            try {
+                const res = await authFetch(`${API_BASE}/gems`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, description: desc, prompt })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showGemMessage(data.message, 'success');
+                    toggleGemCreateForm();
+                    fetchGems();
+                } else {
+                    showGemMessage(data.message, 'error');
+                }
+            } catch (e) {
+                showGemMessage('网络错误: ' + e.message, 'error');
+            }
+        }
+
+        // 激活/取消激活 Gem
+        async function activateGem(gemId) {
+            // 空值或占位符表示取消激活，走专门的 deactivate 路由（避免 /gems//activate 的 404）
+            const isDeactivate = !gemId || gemId.toLowerCase() === 'none';
+            try {
+                const url = isDeactivate
+                    ? `${API_BASE}/gems/deactivate`
+                    : `${API_BASE}/gems/${encodeURIComponent(gemId)}/activate`;
+                const res = await authFetch(url, { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    showGemMessage(data.message, 'success');
+                    currentGemId = data.gem_id || '';
+                    fetchGems();
+                    fetchStatus();
+                } else {
+                    showGemMessage(data.message, 'error');
+                }
+            } catch (e) {
+                showGemMessage('网络错误: ' + e.message, 'error');
+            }
+        }
+
+        // 删除 Gem
+        async function deleteGem(gemId, gemName) {
+            if (!confirm(`确定删除 Gem "${gemName}" 吗？此操作不可撤销。`)) return;
+            try {
+                const res = await authFetch(`${API_BASE}/gems/${encodeURIComponent(gemId)}`, {
+                    method: 'DELETE'
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showGemMessage(data.message, 'success');
+                    fetchGems();
+                    fetchStatus();
+                } else {
+                    showGemMessage(data.message, 'error');
+                }
+            } catch (e) {
+                showGemMessage('网络错误: ' + e.message, 'error');
+            }
+        }
+
+        // ===== Gem 编辑弹窗 =====
+        let _editingGemId = null;
+
+        // 打开编辑弹窗（需要先获取最新数据）
+        async function openGemEditModal(gemId) {
+            _editingGemId = gemId;
+            try {
+                const res = await authFetch(`${API_BASE}/gems`);
+                const data = await res.json();
+                if (!data.success) {
+                    showGemMessage(data.message, 'error');
+                    return;
+                }
+                const gem = (data.gems || []).find(g => g.id === gemId);
+                if (!gem) {
+                    showGemMessage('找不到该 Gem', 'error');
+                    return;
+                }
+                document.getElementById('editGemName').value = gem.name || '';
+                document.getElementById('editGemDesc').value = gem.description || '';
+                document.getElementById('editGemPrompt').value = gem.prompt || '';
+                document.getElementById('gemEditModal').classList.add('active');
+            } catch (e) {
+                showGemMessage('网络错误: ' + e.message, 'error');
+            }
+        }
+
+        function closeGemEditModal() {
+            document.getElementById('gemEditModal').classList.remove('active');
+            _editingGemId = null;
+        }
+
+        async function saveGemEdit() {
+            if (!_editingGemId) return;
+            const name = document.getElementById('editGemName').value.trim();
+            const desc = document.getElementById('editGemDesc').value.trim();
+            const prompt = document.getElementById('editGemPrompt').value.trim();
+            if (!name || !prompt) {
+                showGemMessage('名称和 System Prompt 不能为空', 'error');
+                return;
+            }
+            try {
+                const res = await authFetch(`${API_BASE}/gems/${encodeURIComponent(_editingGemId)}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, description: desc, prompt })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showGemMessage(data.message, 'success');
+                    closeGemEditModal();
+                    fetchGems();
+                } else {
+                    showGemMessage(data.message, 'error');
+                }
+            } catch (e) {
+                showGemMessage('网络错误: ' + e.message, 'error');
+            }
+        }
+
         // HTML 转义
         function escapeHtml(text) {
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
+        }
+
+        // HTML 属性转义（用于 data-*，避免用户创建的 Gem 名称/ID 破坏属性边界）
+        function escapeAttr(text) {
+            return String(text).replace(/[&<>"']/g, (ch) => ({
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#39;',
+            }[ch]));
         }
     </script>
 </body>

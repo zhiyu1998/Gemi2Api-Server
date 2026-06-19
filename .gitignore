@@ -13,3 +13,4 @@ secrets/
 # 本地开发脚本产物
 .dev-logs/
 dev.ps1
+.trae/rules/git-commit-message.md
