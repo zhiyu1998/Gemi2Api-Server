@@ -36,7 +36,33 @@ API_KEY= "API_KEY VALUE HERE"
 TEMPORARY_CHAT = "false" # 使用临时对话模式，此模式会禁用部分功能如思考、图片生成等，默认关闭。
 AUTO_DELETE_CHAT = "true" # 生成结束后自动从web端删除对话记录，默认开启。TEMPORARY_CHAT为true时，此项无效。
 PUBLIC_BASE_URL = "https://your-domain.com" # 外部URL，用于生成图片代理链接，不填则会使用内部地址。使用反向代理时必填，否则可能导致图片无法访问。
+CUSTOM_MODELS_FILE = "custom_models.yaml" # 可选。用于覆写/新增 Gemini 模型定义，支持 YAML/JSON。
 ```
+
+`custom_models.yaml` 示例：
+
+```yaml
+models:
+  - model_name: "gemini-3.5-flash"
+    model_header:
+      x-goog-ext-525001261-jspb: '[1,null,null,null,"56fdd199312815e2",null,null,0,[4,5,6,8],null,null,2,null,null,1,1,"09D681E7-26F2-4A94-A465-38386B7AB93B"]'
+  - model_name: "gemini-3.5-flash-extended"
+    model_header:
+      x-goog-ext-525001261-jspb: '[1,null,null,null,"56fdd199312815e2",null,null,0,[4,5,6,8],null,null,2,null,null,1,2,"B827D4F4-D475-4ECA-9111-5C1296A38681"]'
+  - model_name: "gemini-3.1-flash-lite"
+    model_header:
+      x-goog-ext-525001261-jspb: '[1,null,null,null,"8c46e95b1a07cecc",null,null,0,[4,5,6,8],null,null,2,null,null,6,1,"09D681E7-26F2-4A94-A465-38386B7AB93B"]'
+  - model_name: "gemini-3.1-pro"
+    model_header:
+      x-goog-ext-525001261-jspb: '[1,null,null,null,"e6fa609c3fa255c0",null,null,0,[4,5,6,8],null,null,2,null,null,3,1,"09D681E7-26F2-4A94-A465-38386B7AB93B"]'
+  - model_name: "gemini-deep-research"
+    model_header:
+      x-goog-ext-525001261-jspb: '[1,null,null,null,"cd472a54d2abba7e"]'
+```
+
+> `main.py` 会按 `CUSTOM_MODELS_FILE` 中的 `model_header` 原样透传；如果你需要 `x-goog-ext-73010989-jspb` 或 `x-goog-ext-73010990-jspb`，请在 YAML 里显式写出来。
+> `x-goog-ext-525005358-jspb` 不需要手填，运行时会按每次请求自动生成。
+> `CUSTOM_MODELS_FILE` 会在每次请求/读取模型列表时重新加载，修改文件内容后无需重启服务。
 
 1. 安装依赖
 

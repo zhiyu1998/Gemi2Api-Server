@@ -25,6 +25,7 @@ load_dotenv(Path(__file__).parent / ".env")
 
 import httpx
 import numpy as np
+import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
@@ -172,6 +173,68 @@ AUTH_FAILURE_TEXT_PATTERNS = (
 DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 Edg/144.0.0.0"
 
 os.environ.setdefault("GEMINI_COOKIE_PATH", GEMINI_COOKIE_PATH)
+
+
+def normalize_custom_model_specs(raw_config) -> List[Dict[str, Dict[str, str]]]:
+	"""Normalize custom model config from dict/list YAML or JSON."""
+	if not raw_config:
+		return []
+
+	if isinstance(raw_config, dict):
+		raw_config = raw_config.get("models", [raw_config])
+
+	if not isinstance(raw_config, list):
+		raise ValueError("Custom model config must be a list or a dict containing a 'models' list")
+
+	normalized_models = []
+	for idx, item in enumerate(raw_config, start=1):
+		if not isinstance(item, dict):
+			raise ValueError(f"Custom model entry #{idx} must be a mapping")
+
+		model_name = str(item.get("model_name", "")).strip()
+		model_header = item.get("model_header")
+		if not model_name:
+			raise ValueError(f"Custom model entry #{idx} is missing model_name")
+		if not isinstance(model_header, dict):
+			raise ValueError(f"Custom model '{model_name}' must define model_header as a mapping")
+
+		normalized_models.append(
+			{
+				"model_name": model_name,
+				"model_header": {str(key): str(value) for key, value in model_header.items()},
+			}
+		)
+
+	return normalized_models
+
+
+def load_custom_models() -> Dict[str, Dict[str, Dict[str, str]]]:
+	"""Load custom model overrides from file/env on demand."""
+	registry = {}
+	custom_models_file = os.environ.get("CUSTOM_MODELS_FILE", "").strip()
+	custom_models = os.environ.get("CUSTOM_MODELS", "").strip()
+
+	if custom_models_file:
+		config_path = Path(custom_models_file)
+		if not config_path.is_absolute():
+			config_path = Path(__file__).parent / config_path
+		if not config_path.exists():
+			raise ValueError(f"CUSTOM_MODELS_FILE does not exist: {config_path}")
+		file_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+		for model in normalize_custom_model_specs(file_config):
+			registry[model["model_name"].lower()] = model
+
+	if custom_models:
+		inline_config = yaml.safe_load(custom_models)
+		for model in normalize_custom_model_specs(inline_config):
+			registry[model["model_name"].lower()] = model
+
+	return registry
+
+
+def get_custom_model_registry() -> Dict[str, Dict[str, Dict[str, str]]]:
+	"""Read the latest custom model config for each request."""
+	return load_custom_models()
 
 
 async def background_delete_chat(client: GeminiClient, cid: str):
@@ -560,26 +623,51 @@ async def error_handling(request: Request, call_next):
 async def list_models():
 	"""返回 gemini_webapi 中声明的模型列表"""
 	now = int(datetime.now(tz=timezone.utc).timestamp())
-	data = [
-		{
-			"id": m.model_name,  # 如 "gemini-2.0-flash"
-			"object": "model",
-			"created": now,
-			"owned_by": "google-gemini-web",
-		}
-		for m in Model
-	]
+	data = []
+	seen = set()
+	custom_model_registry = get_custom_model_registry()
+
+	for custom_model in custom_model_registry.values():
+		model_name = custom_model["model_name"]
+		seen.add(model_name.lower())
+		data.append(
+			{
+				"id": model_name,
+				"object": "model",
+				"created": now,
+				"owned_by": "google-gemini-web",
+			}
+		)
+
+	for m in Model:
+		if m is Model.UNSPECIFIED:
+			continue
+		if m.model_name.lower() in seen:
+			continue
+		data.append(
+			{
+				"id": m.model_name,  # 如 "gemini-3.0-flash"
+				"object": "model",
+				"created": now,
+				"owned_by": "google-gemini-web",
+			}
+		)
 	return {"object": "list", "data": data}
 
 
 # Helper to convert between Gemini and OpenAI model names
-def map_model_name(openai_model_name: str) -> Model:
-	"""根据模型名称字符串查找匹配的 Model 枚举值。
+def map_model_name(openai_model_name: str) -> Union[Model, Dict[str, Dict[str, str]]]:
+	"""根据模型名称字符串查找匹配的 Model 枚举值或自定义模型配置。
 
-	只走 from gemini_webapi.constants import Model，不做任何兼容：
-	  精确匹配 Model 枚举的 model_name（大小写不敏感），找不到则返回第一个非 UNSPECIFIED 模型。
+	优先命中自定义模型注册表，这样可以覆写 gemini_webapi 内置模型头。
+	找不到自定义配置时，再精确匹配 Model 枚举（大小写不敏感）；
+	仍找不到则返回第一个非 UNSPECIFIED 模型。
 	"""
 	normalized = openai_model_name.lower()
+	custom_model_registry = get_custom_model_registry()
+
+	if normalized in custom_model_registry:
+		return custom_model_registry[normalized]
 
 	# 精确匹配 Model 枚举
 	for m in Model:
@@ -592,6 +680,20 @@ def map_model_name(openai_model_name: str) -> Model:
 		if m is not Model.UNSPECIFIED:
 			return m
 	return next(iter(Model))
+
+
+def get_effective_model_debug_info(model: Union[Model, Dict[str, Dict[str, str]]]) -> Dict[str, Dict[str, str] | str]:
+	"""Return the resolved model name and headers for request logging."""
+	if isinstance(model, dict):
+		return {
+			"model_name": str(model.get("model_name", "")),
+			"model_header": {str(key): str(value) for key, value in model.get("model_header", {}).items()},
+		}
+
+	return {
+		"model_name": getattr(model, "model_name", str(model)),
+		"model_header": {str(key): str(value) for key, value in getattr(model, "model_header", {}).items()},
+	}
 
 
 # Prepare conversation history from OpenAI messages format
@@ -786,6 +888,13 @@ async def create_chat_completion(
 
 		# 获取适当的模型
 		model = map_model_name(request.model)
+		model_debug_info = get_effective_model_debug_info(model)
+		logger.info(
+			"Resolved Gemini model: requested=%s effective=%s headers=%s",
+			request.model,
+			model_debug_info["model_name"],
+			model_debug_info["model_header"],
+		)
 
 		# 创建响应对象
 		completion_id = f"chatcmpl-{uuid.uuid4()}"
