@@ -58,6 +58,18 @@ models:
   - model_name: "gemini-deep-research"
     model_header:
       x-goog-ext-525001261-jspb: '[1,null,null,null,"cd472a54d2abba7e"]'
+  - model_name: "gemini-3.6-flash"
+    model_header:
+      x-goog-ext-525001261-jspb: '[1,null,null,null,"fbb127bbb056c959",null,null,0,[4,5,6,8],null,null,1,null,null,1,1,"0827BFC9-35C9-4CF1-A987-87F0B2BF0C6E"]'
+  - model_name: "gemini-3.5-flash-lite"
+    model_header:
+      x-goog-ext-525001261-jspb: '[1,null,null,null,"cf41b0e0dd7d53e5",null,null,0,[4,5,6,8],null,null,1,null,null,6,1,"0827BFC9-35C9-4CF1-A987-87F0B2BF0C6E"]'
+  - model_name: "gemini-3.6-flash-extended"
+    model_header:
+      x-goog-ext-525001261-jspb: '[1,null,null,null,"fbb127bbb056c959",null,null,0,[4,5,6,8],null,null,1,null,null,1,2,"3E5BE600-4DF2-4821-B682-4A4B3885F8F8"]'
+  - model_name: "gemini-3.5-flash-lite-extended"
+    model_header:
+      x-goog-ext-525001261-jspb: '[1,null,null,null,"cf41b0e0dd7d53e5",null,null,0,[4,5,6,8],null,null,1,null,null,6,2,"3E5BE600-4DF2-4821-B682-4A4B3885F8F8"]'
 ```
 
 > `main.py` 会按 `CUSTOM_MODELS_FILE` 中的 `model_header` 原样透传；如果你需要 `x-goog-ext-73010989-jspb` 或 `x-goog-ext-73010990-jspb`，请在 YAML 里显式写出来。

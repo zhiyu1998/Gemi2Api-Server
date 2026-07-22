@@ -14,3 +14,5 @@ secrets/
 .dev-logs/
 dev.ps1
 .trae/rules/git-commit-message.md
+AGENTS.md
+custom_models.yaml
