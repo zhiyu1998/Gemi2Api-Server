@@ -16,4 +16,7 @@ dev.ps1
 .trae/rules/git-commit-message.md
 AGENTS.md
 custom_models.yaml
-tests/
+
+# 测试：源码入库，只忽略缓存
+tests/__pycache__/
+.pytest_cache/

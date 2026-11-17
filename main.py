@@ -15,7 +15,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 from urllib.parse import quote, urlparse
 
 from dotenv import load_dotenv
@@ -49,6 +49,15 @@ from gemini_wire import active_spec as active_model_spec
 from gemini_wire import install as install_wire_shim
 from gemini_wire import pop_spec as gemini_wire_pop_spec
 from gemini_wire import push_spec as gemini_wire_push_spec
+from gemini_tools import (
+	TOOL_FENCE_CLOSE,
+	TOOL_FENCE_OPEN,
+	ToolFenceGate,
+	build_tools_instruction,
+	format_tool_result,
+	parse_tool_calls,
+	tool_calls_for_stream,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -523,8 +532,11 @@ class ContentItem(BaseModel):
 
 class Message(BaseModel):
 	role: str
-	content: Union[str, List[ContentItem]]
+	content: Union[str, List[ContentItem], None] = None
 	name: Optional[str] = None
+	# tools 回放用：assistant 的调用记录、tool 角色对应的调用 id
+	tool_calls: Optional[List[Dict[str, Any]]] = None
+	tool_call_id: Optional[str] = None
 
 
 class ChatCompletionRequest(BaseModel):
@@ -538,6 +550,9 @@ class ChatCompletionRequest(BaseModel):
 	presence_penalty: Optional[float] = 0
 	frequency_penalty: Optional[float] = 0
 	user: Optional[str] = None
+	# OpenAI tools / function calling（提示词模拟，见 gemini_tools.py）
+	tools: Optional[List[Dict[str, Any]]] = None
+	tool_choice: Optional[Union[str, Dict[str, Any]]] = None
 	# 思考档走 OpenAI 规范字段 reasoning_effort（low / medium / high），
 	# 另外兼容几个常见写法，免得客户端要改代码。
 	reasoning_effort: Optional[str] = None
@@ -738,7 +753,12 @@ def get_effective_model_debug_info(spec: ModelSpec) -> Dict[str, str]:
 
 
 # Prepare conversation history from OpenAI messages format
-def prepare_conversation(messages: List[Message], skip_system: bool = False) -> tuple:
+def prepare_conversation(
+	messages: List[Message],
+	skip_system: bool = False,
+	tools: Optional[List[Dict[str, Any]]] = None,
+	tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
+) -> tuple:
 	"""
 	Convert a list of OpenAI-formatted message objects into a
 	flat string conversation format suitable for the Gemini API.
@@ -747,60 +767,111 @@ def prepare_conversation(messages: List[Message], skip_system: bool = False) -> 
 	Args:
 		skip_system: 当启用 Gemini Gem 时传 True，跳过 system 消息拼接，
 			避免与 Gem 的 system prompt 重复冲突。
+		tools / tool_choice: OpenAI tools 定义；Gemini 网页端没有协议层工具调用，
+			这里把定义拼成指令让模型吐 ```tool_call``` 围栏（见 gemini_tools.py）。
 
 	Returns:
 		A tuple containing the constructed conversation string and a list of paths to temporary image files.
 	"""
-	conversation = ""
-	temp_files = []
+	parts: List[str] = []
+	temp_files: List[str] = []
+
+	# 工具格式指令放最前，末尾还会再锚一次（agentic 客户端的长提示会把顶部指令冲掉）
+	tools_top, tools_bottom = build_tools_instruction(tools, tool_choice)
+	if tools_top:
+		parts.append(tools_top)
 
 	for msg in messages:
 		# 启用 Gem 时跳过 system 消息（Gem 本身就是 system prompt 通道）
 		if skip_system and msg.role == "system":
 			continue
-		if isinstance(msg.content, str):
-			# String content handling
-			if msg.role == "system":
-				conversation += f"System: {msg.content}\n\n"
-			elif msg.role == "user":
-				conversation += f"Human: {msg.content}\n\n"
-			elif msg.role == "assistant":
-				conversation += f"Assistant: {msg.content}\n\n"
+
+		# tool 角色：工具执行结果回放，给模型一个清爽的成功/失败信号
+		if msg.role == "tool":
+			parts.append(format_tool_result(msg.name or "", _content_to_text(msg.content)))
+			continue
+
+		text, images = _message_content_to_text(msg.content, temp_files)
+		temp_files.extend(images)
+
+		if msg.role == "system":
+			parts.append(f"System: {text}")
+		elif msg.role == "assistant":
+			block = f"Assistant: {text}"
+			# assistant 的调用记录渲染回围栏，让模型看到自己调过什么
+			fences = _tool_calls_to_fences(msg.tool_calls)
+			if fences:
+				block += "\n" + fences
+			parts.append(block)
 		else:
-			# Mixed content handling
-			if msg.role == "user":
-				conversation += "Human: "
-			elif msg.role == "system":
-				conversation += "System: "
-			elif msg.role == "assistant":
-				conversation += "Assistant: "
+			parts.append(f"Human: {text}")
 
-			for item in msg.content:
-				if item.type == "text":
-					conversation += item.text or ""
-				elif item.type == "image_url" and item.image_url:
-					# Handle image
-					image_url = item.image_url.get("url", "")
-					if image_url.startswith("data:image/"):
-						# Process base64 encoded image
-						try:
-							# Extract the base64 part
-							base64_data = image_url.split(",")[1]
-							image_data = base64.b64decode(base64_data)
+	if tools_bottom:
+		parts.append(tools_bottom)
 
-							# Create temporary file to hold the image
-							with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-								tmp.write(image_data)
-								temp_files.append(tmp.name)
-						except Exception as e:
-							logger.error(f"Error processing base64 image: {str(e)}")
-
-			conversation += "\n\n"
+	conversation = "\n\n".join(part for part in parts if part)
 
 	# Add a final prompt for the assistant to respond to
+	if conversation:
+		conversation += "\n\n"
 	conversation += "Assistant: "
 
 	return conversation, temp_files
+
+
+def _content_to_text(content: Union[str, List[ContentItem], None]) -> str:
+	"""把 OpenAI content（字符串或内容数组）压成纯文本，忽略图片部分。"""
+	if content is None:
+		return ""
+	if isinstance(content, str):
+		return content
+	bits = []
+	for item in content:
+		if item.type == "text" and item.text:
+			bits.append(item.text)
+	return "\n".join(bits)
+
+
+def _message_content_to_text(content: Union[str, List[ContentItem], None], temp_files: List[str]) -> tuple:
+	"""文本 + 图片分开处理：文本进 prompt，base64 图片落成临时文件交给上游上传。"""
+	if content is None:
+		return "", []
+	if isinstance(content, str):
+		return content, []
+
+	text_bits: List[str] = []
+	images: List[str] = []
+	for item in content:
+		if item.type == "text":
+			text_bits.append(item.text or "")
+		elif item.type == "image_url" and item.image_url:
+			image_url = item.image_url.get("url", "")
+			if image_url.startswith("data:image/"):
+				try:
+					image_data = base64.b64decode(image_url.split(",")[1])
+					with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+						tmp.write(image_data)
+						images.append(tmp.name)
+				except Exception as e:
+					logger.error(f"Error processing base64 image: {str(e)}")
+	return "\n".join(text_bits), images
+
+
+def _tool_calls_to_fences(tool_calls: Optional[List[Dict[str, Any]]]) -> str:
+	"""把 assistant 的历史 tool_calls 渲染成 ```tool_call``` 围栏文本。"""
+	if not tool_calls:
+		return ""
+	fences = []
+	for call in tool_calls:
+		if not isinstance(call, dict):
+			continue
+		function = call.get("function") if isinstance(call.get("function"), dict) else {}
+		name = (function.get("name") or "").strip()
+		if not name:
+			continue
+		arguments = function.get("arguments") or "{}"
+		fences.append(f'{TOOL_FENCE_OPEN}\n{{"name": "{name}", "arguments": {arguments}}}\n{TOOL_FENCE_CLOSE}')
+	return "\n".join(fences)
 
 
 # Dependency to get the initialized Gemini client
@@ -920,13 +991,20 @@ async def create_chat_completion(
 		gemini_client = await get_gemini_client()
 
 		# 转换消息为对话格式（启用 Gem 时跳过 system 消息）
-		conversation, temp_files = prepare_conversation(request.messages, skip_system=bool(GEM_ID))
+		conversation, temp_files = prepare_conversation(
+			request.messages,
+			skip_system=bool(GEM_ID),
+			tools=request.tools,
+			tool_choice=request.tool_choice,
+		)
+		tools_active = bool(build_tools_instruction(request.tools, request.tool_choice)[0])
 		logger.info(
-			"Chat completion request: stream=%s requested_model=%s messages=%s temp_files=%s",
+			"Chat completion request: stream=%s requested_model=%s messages=%s temp_files=%s tools=%s",
 			request.stream,
 			request.model,
 			len(request.messages),
 			len(temp_files),
+			len(request.tools or []) if tools_active else 0,
 		)
 
 		# 解析模型（自定义模型优先，其次内置目录；Gemini 4 系列在这里落到 hex/档位/思考档）
@@ -1007,6 +1085,10 @@ async def create_chat_completion(
 					thinking_ended = False
 					yielded_images = 0
 					text_buffer = ""
+					full_text = ""
+					# 带 tools 时用围栏闸门：围栏内容全部扣住，收尾统一转成 tool_calls
+					gate_output: List[str] = []
+					gate = ToolFenceGate(gate_output.append) if tools_active else None
 					captured_cid = None
 					chunk_count = 0
 					last_metadata = None
@@ -1040,22 +1122,31 @@ async def create_chat_completion(
 								thinking_ended = True
 								yield make_chunk({"content": "\n</think>\n\n"})
 
-							text_buffer += chunk.text_delta
-							safe_to_yield = False
+							full_text += chunk.text_delta
 
-							# Yield if buffer ends with whitespace and looks like it's outside a markdown link
-							if (
-								text_buffer[-1].isspace()
-								and text_buffer.count("[") == text_buffer.count("]")
-								and text_buffer.count("(") == text_buffer.count(")")
-							):
-								safe_to_yield = True
-							elif len(text_buffer) > 500:
-								safe_to_yield = True
+							if gate is not None:
+								# 只放行确定不在围栏里的部分，围栏等收尾统一解析
+								gate.push(chunk.text_delta)
+								for piece in gate_output:
+									yield make_chunk({"content": postprocess_text(piece)})
+								gate_output.clear()
+							else:
+								text_buffer += chunk.text_delta
+								safe_to_yield = False
 
-							if safe_to_yield:
-								yield make_chunk({"content": postprocess_text(text_buffer)})
-								text_buffer = ""
+								# Yield if buffer ends with whitespace and looks like it's outside a markdown link
+								if (
+									text_buffer[-1].isspace()
+									and text_buffer.count("[") == text_buffer.count("]")
+									and text_buffer.count("(") == text_buffer.count(")")
+								):
+									safe_to_yield = True
+								elif len(text_buffer) > 500:
+									safe_to_yield = True
+
+								if safe_to_yield:
+									yield make_chunk({"content": postprocess_text(text_buffer)})
+									text_buffer = ""
 
 						# Handle inline images as they arrive
 						if hasattr(chunk, "images") and chunk.images and len(chunk.images) > yielded_images:
@@ -1075,15 +1166,29 @@ async def create_chat_completion(
 							yielded_images = len(chunk.images)
 
 					# Flush any remaining text
-					if text_buffer:
+					stream_tool_calls: List[Dict[str, Any]] = []
+					if gate is not None:
+						# 围栏剥掉后的正文才是最终文本；尾巴按「已发内容」对齐补发
+						clean_text, stream_tool_calls = parse_tool_calls(full_text)
+						tail = gate.remaining(clean_text)
+						if tail:
+							yield make_chunk({"content": postprocess_text(tail)})
+						if not clean_text.strip() and not stream_tool_calls:
+							# 只有一个解析不了的围栏：不能静默回空，客户端会看不出失败
+							logger.warning("Streaming reply had only an unparseable tool_call block")
+							yield make_chunk({"content": "\n\n[上游只返回了一个解析不了的 tool_call 块，请重试]"})
+					elif text_buffer:
 						yield make_chunk({"content": postprocess_text(text_buffer)})
 
 					# Close thinking tag if it was never closed
 					if thinking_started and not thinking_ended:
 						yield make_chunk({"content": "\n</think>\n\n"})
 
-					# Send finish chunk
-					yield make_chunk({}, finish_reason="stop")
+					# Send finish chunk（有工具调用时 finish_reason 必须是 tool_calls）
+					if stream_tool_calls:
+						yield make_chunk({"tool_calls": tool_calls_for_stream(stream_tool_calls)}, finish_reason="tool_calls")
+					else:
+						yield make_chunk({}, finish_reason="stop")
 					yield "data: [DONE]\n\n"
 
 					logger.info(
@@ -1138,21 +1243,40 @@ async def create_chat_completion(
 						logger.warning(f"Failed to delete temp file {temp_file}: {str(e)}")
 
 			# 提取文本响应
-			reply_text = ""
+			thoughts_text = ""
 			if ENABLE_THINKING and hasattr(response, "thoughts") and response.thoughts:
-				reply_text += f"<think>\n{response.thoughts}\n</think>\n\n"
-			if hasattr(response, "text"):
-				reply_text += response.text
-			else:
-				reply_text += str(response)
+				thoughts_text = f"<think>\n{response.thoughts}\n</think>\n\n"
+			raw_text = getattr(response, "text", None) or str(response)
 
+			# tools：把 ```tool_call``` 围栏解析成 OpenAI 的 tool_calls
+			tool_calls: List[Dict[str, Any]] = []
+			if tools_active:
+				clean_text, tool_calls = parse_tool_calls(raw_text)
+				if not clean_text.strip() and not tool_calls:
+					# 只有一个解析不了的围栏（JSON 写坏 / 没有工具名）：必须报错，
+					# 不能回 200 + content:null 且不带 tool_calls，客户端看不出失败
+					logger.warning("Non-stream reply had only an unparseable tool_call block")
+					raise HTTPException(
+						status_code=502,
+						detail="upstream reply had only an unparseable tool_call block; please retry",
+					)
+				raw_text = clean_text
+
+			reply_text = thoughts_text + raw_text
 			# 提取并追加图片响应
 			reply_text += extract_image_markdown(response, base_url)
 			reply_text = postprocess_text(reply_text)
 
-			if not reply_text or reply_text.strip() == "":
+			if not tool_calls and (not reply_text or reply_text.strip() == ""):
 				logger.warning("Empty response received from Gemini")
 				reply_text = "Server returned an empty response. Please check that Gemini API credentials are valid."
+
+			message: Dict[str, Any] = {
+				"role": "assistant",
+				"content": reply_text if reply_text.strip() else None,
+			}
+			if tool_calls:
+				message["tool_calls"] = tool_calls
 
 			result = {
 				"id": completion_id,
@@ -1162,8 +1286,8 @@ async def create_chat_completion(
 				"choices": [
 					{
 						"index": 0,
-						"message": {"role": "assistant", "content": reply_text},
-						"finish_reason": "stop",
+						"message": message,
+						"finish_reason": "tool_calls" if tool_calls else "stop",
 					}
 				],
 				"usage": {
@@ -1173,7 +1297,7 @@ async def create_chat_completion(
 				},
 			}
 
-			logger.info("Non-streaming response completed")
+			logger.info("Non-streaming response completed: tool_calls=%s", len(tool_calls))
 			return result
 
 	except HTTPException:

@@ -3,6 +3,12 @@
 跑法：.venv/Scripts/python.exe selftest_wire.py
 """
 
+import sys
+from pathlib import Path
+
+# 直接跑脚本时把项目根加进 sys.path，这样能 import 到 gemini_models / gemini_tools
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import json
 
 import gemini_models as gm
