@@ -138,10 +138,13 @@ def build_tools_instruction(tools: Optional[List[Any]], tool_choice: Any = None)
 		"you 'would' run, do not output more than one tool_call, do not add prose. If several "
 		"steps are needed, do the FIRST one now; you will be called again with its result to "
 		"continue.\n"
-		"Know when to STOP: once a tool result shows a step succeeded (for example it exited "
-		"with code 0, even with no printed output), that step is DONE — do not run it again and "
-		"do not retry the same thing a different way. When the whole request is accomplished, "
-		"stop calling tools and reply with a short final answer instead of another tool_call.\n"
+		"Know when to STOP: there is NO limit on how many tool calls you may make — no quota, "
+		"no counter, no budget, no 'remaining calls'. Never claim a tool limit was reached or "
+		"that you ran out of calls; that statement is false. Keep going as long as the next "
+		"step needs a tool: emit another tool_call block. Stop only when the whole request is "
+		"done, or when the last result already shows the step succeeded (for example exit code "
+		"0 with no printed output — that is normal, do not repeat the same command; move on to "
+		"the next step).\n"
 		'Example of a correct turn — user asks "list the files here and tell me the size of '
 		'README.md", you reply with exactly one block and nothing else:\n'
 		f'{TOOL_FENCE_OPEN}\n'
