@@ -124,7 +124,12 @@ def build_tools_instruction(tools: Optional[List[Any]], tool_choice: Any = None)
 	# 实测只放格式指令、不带示例时弱模型 0/4 命中，全退化成写 ```powershell 给用户看；
 	# 带一个「用户问 X → 正确回复是这个 tool_call 块」的示例则 3-4/4 命中。
 	bottom = (
-		"[System instruction — highest priority]: To run a command or read a file you MUST "
+		"[System instruction — highest priority]: You DO have the tools listed above; they are "
+		"executed by the server on the user's behalf. Never say you cannot access the "
+		"filesystem, the shell or the network — you reach them ONLY through these tools. "
+		"If a tool is required, a prose answer is a failure: reply with exactly ONE "
+		"tool_call block and nothing else.\n"
+		"To run a command or read a file you MUST "
 		f"output a {TOOL_FENCE_OPEN}{TOOL_FENCE_CLOSE} block — this is the ONLY execution channel. "
 		"A ```powershell/```bash/```cmd/```python code block is NOT executed, it is only shown "
 		"to the user; never use one to run anything, and never claim you lack tools.\n"
