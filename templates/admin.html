@@ -619,6 +619,13 @@
                         <span class="slider"></span>
                     </label>
                 </div>
+                <div class="config-item">
+                    <span class="config-label" title="DISABLE_BUILTIN_MODELS：开启后 /v1/models 仅返回 CUSTOM_MODELS(_FILE) 中定义的模型，不再追加 gemini_webapi 内置模型">仅返回自定义模型</span>
+                    <label class="toggle">
+                        <input type="checkbox" id="toggleDisableBuiltin" onchange="toggleFeature('disableBuiltin').then(fetchModels)">
+                        <span class="slider"></span>
+                    </label>
+                </div>
             </div>
         </div>
 
@@ -898,6 +905,7 @@
                 document.getElementById('toggleThinking').checked = data.thinking_enabled || false;
                 document.getElementById('toggleTemporary').checked = data.temporary_chat || false;
                 document.getElementById('toggleAutoDelete').checked = data.auto_delete_chat || false;
+                document.getElementById('toggleDisableBuiltin').checked = data.disable_builtin_models || false;
 
                 // 当前激活的 Gem ID（供配置弹窗和 Gems 卡片高亮使用）
                 currentGemId = data.gem_id || '';

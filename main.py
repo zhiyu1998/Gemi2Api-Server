@@ -30,9 +30,25 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from gemini_webapi import GeminiClient, set_log_level
-from gemini_webapi.constants import Model
+from gemini_webapi.constants import MODEL_HEADER_KEY
 from PIL import Image
 from pydantic import BaseModel
+
+from gemini_models import (
+	BUILTIN_MODELS,
+	TIER_SUFFIXES,
+	ModelSpec,
+	build_model_arg,
+	fuzzy_builtin,
+	normalize_model_name,
+	parse_header_spec,
+	resolve_builtin,
+	think_from_effort,
+)
+from gemini_wire import active_spec as active_model_spec
+from gemini_wire import install as install_wire_shim
+from gemini_wire import pop_spec as gemini_wire_pop_spec
+from gemini_wire import push_spec as gemini_wire_push_spec
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -522,6 +538,11 @@ class ChatCompletionRequest(BaseModel):
 	presence_penalty: Optional[float] = 0
 	frequency_penalty: Optional[float] = 0
 	user: Optional[str] = None
+	# 思考档走 OpenAI 规范字段 reasoning_effort（low / medium / high），
+	# 另外兼容几个常见写法，免得客户端要改代码。
+	reasoning_effort: Optional[str] = None
+	thinking_effort: Optional[str] = None
+	think_effort: Optional[str] = None
 
 
 class Choice(BaseModel):
@@ -622,82 +643,97 @@ async def error_handling(request: Request, call_next):
 # Get list of available models
 @app.get("/v1/models")
 async def list_models():
-	"""返回 gemini_webapi 中声明的模型列表"""
+	"""返回内置模型目录（含 Gemini 4 系列）与自定义模型。
+
+	只列路由名；思考档由请求里的 reasoning_effort（low/medium/high）决定。
+	"""
 	now = int(datetime.now(tz=timezone.utc).timestamp())
 	data = []
 	seen = set()
-	custom_model_registry = get_custom_model_registry()
 
-	for custom_model in custom_model_registry.values():
-		model_name = custom_model["model_name"]
-		seen.add(model_name.lower())
+	def add(model_id: str):
+		key = model_id.lower()
+		if key in seen:
+			return
+		seen.add(key)
 		data.append(
 			{
-				"id": model_name,
+				"id": model_id,
 				"object": "model",
 				"created": now,
 				"owned_by": "google-gemini-web",
 			}
 		)
+
+	for custom_model in get_custom_model_registry().values():
+		add(custom_model["model_name"])
 
 	# 禁用内置模型时，仅返回自定义模型
-	if DISABLE_BUILTIN_MODELS:
-		return {"object": "list", "data": data}
+	if not DISABLE_BUILTIN_MODELS:
+		# 只暴露路由名，思考档交给 reasoning_effort 参数
+		for spec in BUILTIN_MODELS.values():
+			if spec.retired:
+				continue
+			add(spec.name)
 
-	for m in Model:
-		if m is Model.UNSPECIFIED:
-			continue
-		if m.model_name.lower() in seen:
-			continue
-		data.append(
-			{
-				"id": m.model_name,  # 如 "gemini-3.0-flash"
-				"object": "model",
-				"created": now,
-				"owned_by": "google-gemini-web",
-			}
-		)
 	return {"object": "list", "data": data}
 
 
-# Helper to convert between Gemini and OpenAI model names
-def map_model_name(openai_model_name: str) -> Union[Model, Dict[str, Dict[str, str]]]:
-	"""根据模型名称字符串查找匹配的 Model 枚举值或自定义模型配置。
+def resolve_model_spec(requested_model: str) -> Optional[ModelSpec]:
+	"""把请求里的模型名解析成模型规格（自定义模型优先，其次内置目录）。
 
-	优先命中自定义模型注册表，这样可以覆写 gemini_webapi 内置模型头。
-	找不到自定义配置时，再精确匹配 Model 枚举（大小写不敏感）；
-	仍找不到则返回第一个非 UNSPECIFIED 模型。
+	认不出确切名字时按关键词兜底（flash/hydrogen → 4 Hydrogen，pro/carbon → 4 Carbon），
+	保证老客户端写的 ``gemini-3.0-flash`` 这类名字也不会整条链路 500。
 	"""
-	normalized = openai_model_name.lower()
+	name = normalize_model_name(requested_model)
+	if not name:
+		return None
+
 	custom_model_registry = get_custom_model_registry()
+	for key, custom_model in custom_model_registry.items():
+		if key != name:
+			# 只接受「自定义名 + 合法档位后缀」，避免 gemini-3.5-flash 误吃掉 -lite
+			suffix = name[len(key) :] if name.startswith(key) else None
+			if not suffix or suffix not in TIER_SUFFIXES:
+				continue
+		header_value = custom_model["model_header"].get(MODEL_HEADER_KEY, "")
+		spec = parse_header_spec(header_value, custom_model["model_name"])
+		if spec is not None:
+			# 自定义模型名带档位后缀时，用后缀覆盖思考档
+			tier = _tier_from_name(name, key)
+			if tier:
+				spec = spec.with_tier(tier, "")
+			return spec
 
-	if normalized in custom_model_registry:
-		return custom_model_registry[normalized]
-
-	# 精确匹配 Model 枚举
-	for m in Model:
-		model_name = m.model_name if hasattr(m, "model_name") else str(m)
-		if normalized == model_name.lower():
-			return m
-
-	# 找不到精确匹配，返回第一个非 UNSPECIFIED 的模型
-	for m in Model:
-		if m is not Model.UNSPECIFIED:
-			return m
-	return next(iter(Model))
+	return resolve_builtin(name) or fuzzy_builtin(name)
 
 
-def get_effective_model_debug_info(model: Union[Model, Dict[str, Dict[str, str]]]) -> Dict[str, Dict[str, str] | str]:
-	"""Return the resolved model name and headers for request logging."""
-	if isinstance(model, dict):
-		return {
-			"model_name": str(model.get("model_name", "")),
-			"model_header": {str(key): str(value) for key, value in model.get("model_header", {}).items()},
-		}
+def _tier_from_name(full_name: str, base_name: str) -> int:
+	"""从 ``<base>-thinking-medium`` 这类名字里取思考档。"""
+	if not full_name.startswith(base_name):
+		return 0
+	return TIER_SUFFIXES.get(full_name[len(base_name) :], 0)
 
+
+def _supports_extended_thinking(client) -> bool:
+	"""gemini-webapi 2.1+ 才有 extended_thinking 参数；2.0.0 只认模型头，交给改写层处理。"""
+	import inspect
+
+	try:
+		params = inspect.signature(client.generate_content).parameters
+	except (TypeError, ValueError):
+		return False
+	return "extended_thinking" in params
+
+
+def get_effective_model_debug_info(spec: ModelSpec) -> Dict[str, str]:
+	"""请求日志用：解析出来的模型名与线上选择参数。"""
 	return {
-		"model_name": getattr(model, "model_name", str(model)),
-		"model_header": {str(key): str(value) for key, value in getattr(model, "model_header", {}).items()},
+		"model_name": spec.name,
+		"hex_id": spec.hex_id,
+		"mode": spec.mode,
+		"think": spec.think_wire,
+		"capacity": spec.capacity,
 	}
 
 
@@ -816,6 +852,8 @@ async def get_gemini_client():
 
 					tmp_client = GeminiClient(psid, psidts)
 					await tmp_client.init(timeout=300)
+					# 装上模型改写层：Gemini 4 的档位/思考档/专用槽位在这里落到线上
+					install_wire_shim(tmp_client)
 					await validate_gemini_client_session(tmp_client, source)
 
 					gemini_client = tmp_client
@@ -891,14 +929,29 @@ async def create_chat_completion(
 			len(temp_files),
 		)
 
-		# 获取适当的模型
-		model = map_model_name(request.model)
-		model_debug_info = get_effective_model_debug_info(model)
+		# 解析模型（自定义模型优先，其次内置目录；Gemini 4 系列在这里落到 hex/档位/思考档）
+		model_spec = resolve_model_spec(request.model)
+		if model_spec is None:
+			raise HTTPException(
+				status_code=400,
+				detail=f"Unknown model: {request.model}. Try gemini-4-hydrogen, gemini-4-carbon or gemini-3.5-flash-lite.",
+			)
+		if model_spec.retired:
+			raise HTTPException(status_code=400, detail=model_spec.retired)
+
+		# 思考档由客户端参数决定（reasoning_effort: low/medium/high），不再靠模型名后缀
+		effort_think = think_from_effort(request.reasoning_effort, request.thinking_effort, request.think_effort)
+		if effort_think:
+			model_spec = model_spec.with_tier(effort_think, "")
+
+		model_debug_info = get_effective_model_debug_info(model_spec)
 		logger.info(
-			"Resolved Gemini model: requested=%s effective=%s headers=%s",
+			"Resolved Gemini model: requested=%s effective=%s hex=%s mode=%s think=%s",
 			request.model,
 			model_debug_info["model_name"],
-			model_debug_info["model_header"],
+			model_debug_info["hex_id"],
+			model_debug_info["mode"],
+			model_debug_info["think"],
 		)
 
 		# 创建响应对象
@@ -907,17 +960,23 @@ async def create_chat_completion(
 		base_url = PUBLIC_BASE_URL or str(raw_request.base_url).rstrip("/")
 
 		# Prepare generate_content arguments
-		gen_kwargs = {"model": model}
+		# 模型以 dict 形式交给 gemini_webapi：hex / 档位写进模型头，
+		# 思考档与 4 系列专用槽位由 gemini_wire 在发请求前统一改写。
+		gen_kwargs = {"model": build_model_arg(model_spec)}
 		if TEMPORARY_CHAT:
 			gen_kwargs["temporary"] = True
 		if temp_files:
 			gen_kwargs["files"] = temp_files
 		if GEM_ID:
 			gen_kwargs["gem"] = GEM_ID
+		if model_spec.extended_thinking and _supports_extended_thinking(gemini_client):
+			gen_kwargs["extended_thinking"] = True
 
 		if request.stream:
 			# Real streaming using upstream generate_content_stream
 			async def generate_stream():
+				# 流式生成在 StreamingResponse 自己的任务里跑，模型规格必须在这里挂上
+				spec_token = gemini_wire_push_spec(model_spec)
 				try:
 
 					def make_chunk(delta: dict, finish_reason=None):
@@ -1042,6 +1101,8 @@ async def create_chat_completion(
 					yield make_chunk({}, finish_reason="stop")
 					yield "data: [DONE]\n\n"
 				finally:
+					gemini_wire_pop_spec(spec_token)
+
 					# Create background task to delete the chat if AUTO_DELETE_CHAT is enabled
 					if AUTO_DELETE_CHAT and captured_cid:
 						asyncio.create_task(background_delete_chat(gemini_client, captured_cid))
@@ -1057,7 +1118,8 @@ async def create_chat_completion(
 		else:
 			# Non-streaming response
 			try:
-				response = await gemini_client.generate_content(conversation, **gen_kwargs)
+				with active_model_spec(model_spec):
+					response = await gemini_client.generate_content(conversation, **gen_kwargs)
 
 				if AUTO_DELETE_CHAT and hasattr(response, "metadata") and response.metadata and len(response.metadata) > 0:
 					cid = response.metadata[0]
@@ -1114,6 +1176,9 @@ async def create_chat_completion(
 			logger.info("Non-streaming response completed")
 			return result
 
+	except HTTPException:
+		# 模型名不认识 / 已下线这类 4xx 直接透出，不要裹成 500
+		raise
 	except Exception as e:
 		logger.error(f"Error generating completion: {str(e)}", exc_info=True)
 		raise HTTPException(status_code=500, detail=f"Error generating completion: {str(e)}")

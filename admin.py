@@ -206,7 +206,7 @@ async def verify_admin_token(request: Request):
 @router.get("/api/status")
 async def get_status(token: str = Depends(verify_admin_token)):
 	"""获取服务状态"""
-	from main import API_KEY, AUTO_DELETE_CHAT, ENABLE_THINKING, GEM_ID, HOST, PORT, SECURE_1PSID, SECURE_1PSIDTS, TEMPORARY_CHAT
+	from main import API_KEY, AUTO_DELETE_CHAT, DISABLE_BUILTIN_MODELS, ENABLE_THINKING, GEM_ID, HOST, PORT, SECURE_1PSID, SECURE_1PSIDTS, TEMPORARY_CHAT
 
 	# 检查 cookie 是否有效（简单检查是否存在）
 	cookie_valid = bool(SECURE_1PSID and SECURE_1PSIDTS)
@@ -236,6 +236,7 @@ async def get_status(token: str = Depends(verify_admin_token)):
 		"thinking_enabled": ENABLE_THINKING,
 		"temporary_chat": TEMPORARY_CHAT,
 		"auto_delete_chat": AUTO_DELETE_CHAT,
+		"disable_builtin_models": DISABLE_BUILTIN_MODELS,
 		"gem_id": GEM_ID,
 		"version": _get_version(),
 		"start_time": datetime.fromtimestamp(_start_time).strftime("%Y-%m-%d %H:%M:%S"),
@@ -261,6 +262,8 @@ async def update_config(config: ConfigUpdate, token: str = Depends(verify_admin_
 			env_key = "TEMPORARY_CHAT"
 		elif config.feature == "autoDelete":
 			env_key = "AUTO_DELETE_CHAT"
+		elif config.feature == "disableBuiltin":
+			env_key = "DISABLE_BUILTIN_MODELS"
 
 		if env_key:
 			write_env({env_key: str(config.enabled).lower()})
@@ -277,6 +280,11 @@ async def update_config(config: ConfigUpdate, token: str = Depends(verify_admin_
 				import main
 
 				main.AUTO_DELETE_CHAT = config.enabled
+			elif config.feature == "disableBuiltin":
+				import main
+
+				# /v1/models 每次请求读取模块全局，面板切换即时生效并持久化到 .env
+				main.DISABLE_BUILTIN_MODELS = config.enabled
 			return {"success": True, "message": f"功能 {config.feature} 已{'启用' if config.enabled else '禁用'}"}
 
 	# 更新网络配置

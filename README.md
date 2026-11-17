@@ -37,57 +37,34 @@ TEMPORARY_CHAT = "false" # 使用临时对话模式，此模式会禁用部分�
 AUTO_DELETE_CHAT = "true" # 生成结束后自动从web端删除对话记录，默认开启。TEMPORARY_CHAT为true时，此项无效。
 PUBLIC_BASE_URL = "https://your-domain.com" # 外部URL，用于生成图片代理链接，不填则会使用内部地址。使用反向代理时必填，否则可能导致图片无法访问。
 CUSTOM_MODELS_FILE = "custom_models.yaml" # 可选。用于覆写/新增 Gemini 模型定义，支持 YAML/JSON。
-DISABLE_BUILTIN_MODELS = "false" # 可选。设为 true 时，/v1/models 仅返回 CUSTOM_MODELS(_FILE) 中定义的模型，不再追加 gemini_webapi 内置模型。此开关在服务启动时读取，修改 .env 后需重启生效（区别于 CUSTOM_MODELS_FILE 的免重启热加载）。
+DISABLE_BUILTIN_MODELS = "true" # 可选。设为 true 时，/v1/models 仅返回 CUSTOM_MODELS(_FILE) 中定义的模型，不再追加 gemini_webapi 内置模型（仓库自带配置用 true，对外只有 4 条路由）。此开关在服务启动时读取，修改 .env 后需重启生效（区别于 CUSTOM_MODELS_FILE 的免重启热加载）；也可在管理面板「功能开关」中切换，即时生效并写回 .env。
 ```
 
-`custom_models.yaml` 示例：
+`custom_models.yaml` 示例（仓库自带这份，配合 `DISABLE_BUILTIN_MODELS="true"` 对外只暴露这 4 条）：
 
 ```yaml
 models:
-  - model_name: "gemini-3.5-flash"
+  - model_name: "gemini-3.5-flash-lite" # 快速解答
     model_header:
-      x-goog-ext-525001261-jspb: '[1,null,null,null,"56fdd199312815e2",null,null,0,[4,5,6,8],null,null,2,null,null,1,1,"09D681E7-26F2-4A94-A465-38386B7AB93B"]'
-  - model_name: "gemini-3.5-flash-extended"
+      x-goog-ext-525001261-jspb: '[1,null,null,null,"cf41b0e0dd7d53e5",null,null,0,[4,5,6,8],null,null,1,null,null,6]'
+
+  - model_name: "gemini-4-hydrogen" # 日常帮助
     model_header:
-      x-goog-ext-525001261-jspb: '[1,null,null,null,"56fdd199312815e2",null,null,0,[4,5,6,8],null,null,2,null,null,1,2,"B827D4F4-D475-4ECA-9111-5C1296A38681"]'
-  - model_name: "gemini-3.1-flash-lite"
+      x-goog-ext-525001261-jspb: '[1,null,null,null,"56fdd199312815e2",null,null,0,[4,5,6,8],null,null,2,null,null,1]'
+
+  - model_name: "gemini-3.1-pro" # 深度研究
     model_header:
-      x-goog-ext-525001261-jspb: '[1,null,null,null,"8c46e95b1a07cecc",null,null,0,[4,5,6,8],null,null,2,null,null,6,1,"09D681E7-26F2-4A94-A465-38386B7AB93B"]'
-  - model_name: "gemini-3.1-pro"
+      x-goog-ext-525001261-jspb: '[1,null,null,null,"9d8ca3786ebdfbea",null,null,0,[4,5,6,8],null,null,1,null,null,3]'
+
+  - model_name: "gemini-4-argon" # 代码与分析（上游名 4 Carbon）
     model_header:
-      x-goog-ext-525001261-jspb: '[1,null,null,null,"e6fa609c3fa255c0",null,null,0,[4,5,6,8],null,null,2,null,null,3,1,"09D681E7-26F2-4A94-A465-38386B7AB93B"]'
-  - model_name: "gemini-deep-research"
-    model_header:
-      x-goog-ext-525001261-jspb: '[1,null,null,null,"cd472a54d2abba7e"]'
-  - model_name: "gemini-3.6-flash"
-    model_header:
-      x-goog-ext-525001261-jspb: '[1,null,null,null,"fbb127bbb056c959",null,null,0,[4,5,6,8],null,null,1,null,null,1,1,"0827BFC9-35C9-4CF1-A987-87F0B2BF0C6E"]'
-  - model_name: "gemini-3.5-flash-lite"
-    model_header:
-      x-goog-ext-525001261-jspb: '[1,null,null,null,"cf41b0e0dd7d53e5",null,null,0,[4,5,6,8],null,null,1,null,null,6,1,"0827BFC9-35C9-4CF1-A987-87F0B2BF0C6E"]'
-  - model_name: "gemini-3.6-flash-extended"
-    model_header:
-      x-goog-ext-525001261-jspb: '[1,null,null,null,"fbb127bbb056c959",null,null,0,[4,5,6,8],null,null,1,null,null,1,2,"3E5BE600-4DF2-4821-B682-4A4B3885F8F8"]'
-  - model_name: "gemini-3.5-flash-lite-extended"
-    model_header:
-      x-goog-ext-525001261-jspb: '[1,null,null,null,"cf41b0e0dd7d53e5",null,null,0,[4,5,6,8],null,null,1,null,null,6,2,"3E5BE600-4DF2-4821-B682-4A4B3885F8F8"]'
-  - model_name: "gemini-3.7-flash"
-    model_header:
-      x-goog-ext-525001261-jspb: '[1,null,null,null,"56fdd199312815e2",null,null,0,[4,5,6,8,4,5,6,8],null,null,2,null,null,1,1,"68ADC952-1090-45A3-881B-066FE84E468A"]'
-  - model_name: "gemini-3.7-flash-extended"
-    model_header:
-      x-goog-ext-525001261-jspb: '[1,null,null,null,"56fdd199312815e2",null,null,0,[4,5,6,8,4,5,6,8],null,null,2,null,null,1,2,"68ADC952-1090-45A3-881B-066FE84E468A"]'
-  - model_name: "gemini-3.8-flash"
-    model_header:
-      x-goog-ext-525001261-jspb: '[1,null,null,null,"56fdd199312815e2",null,null,0,[4,5,6,8,4,5,6,8],null,null,2,null,null,1,1,"FD30080F-8580-412F-BB88-6E42B15C8613"]'
-  - model_name: "gemini-3.8-flash-extended"
-    model_header:
-      x-goog-ext-525001261-jspb: '[1,null,null,null,"56fdd199312815e2",null,null,0,[4,5,6,8,4,5,6,8],null,null,2,null,null,1,2,"FD30080F-8580-412F-BB88-6E42B15C8613"]'
+      x-goog-ext-525001261-jspb: '[1,null,null,null,"95a4c0abcba24364",null,null,0,[4,5,6,8],null,null,2,null,null,8]'
 ```
 
-> `main.py` 会按 `CUSTOM_MODELS_FILE` 中的 `model_header` 原样透传；如果你需要 `x-goog-ext-73010989-jspb` 或 `x-goog-ext-73010990-jspb`，请在 YAML 里显式写出来。
-> `x-goog-ext-525005358-jspb` 不需要手填，运行时会按每次请求自动生成。
-> `CUSTOM_MODELS_FILE` 会在每次请求/读取模型列表时重新加载，修改文件内容后无需重启服务。
+> `model_header` 只需要三个值：下标 4 是模型 hex，下标 11 是账号档位，下标 14 是路由档位。**思考档不要写在这里**，它由请求参数 `reasoning_effort` 决定（见下文「模型与思考档」）。
+> 服务端会把这条 header 解析成模型规格再重建真正的线上请求头，所以不用手抄 UUID、`["boq_..."]`、时间戳这类抓包残留，写了也会被忽略。
+> `x-goog-ext-73010989-jspb` / `x-goog-ext-73010990-jspb` 由服务端补齐；`x-goog-ext-525005358-jspb` 每次请求自动生成，都不用写进 YAML。
+> `CUSTOM_MODELS_FILE` 会在每次请求 / 读取模型列表时重新加载，改完文件不需要重启服务。
 
 1. 安装依赖
 
@@ -123,6 +100,38 @@ uvicorn main:app --reload --host 127.0.0.1 --port 7860
 
 > [!WARNING]
 > tips: `.env.example` 中默认设置了 `API_KEY=Gemi2Api-Server`，复制到 `.env` 后即可登录管理面板。**正式部署前请务必更换为强密码。**
+
+## 模型与思考档
+
+`/v1/models` 返回的就是 `custom_models.yaml` 里这几条（配 `DISABLE_BUILTIN_MODELS="true"` 时不再追加内置模型）：
+
+| 用途 | 模型名 | 上游 | hex | 档位 |
+| --- | --- | --- | --- | --- |
+| 快速解答 | `gemini-3.5-flash-lite` | 3.5 Flash-Lite | `cf41b0e0dd7d53e5` | 6 |
+| 日常帮助 | `gemini-4-hydrogen` | 4 Hydrogen | `56fdd199312815e2` | 1 |
+| 深度研究 | `gemini-3.1-pro` | 3.1 Pro | `9d8ca3786ebdfbea` | 3 |
+| 代码与分析 | `gemini-4-argon` | 4 Carbon（原 Argon） | `95a4c0abcba24364` | 8 |
+
+思考档走 OpenAI 规范的 `reasoning_effort`，**不靠模型名后缀**，同一模型三档都可用：
+
+| `reasoning_effort` | 网页 UI | 思考线值 | 说明 |
+| --- | --- | --- | --- |
+| `low`（或 `minimal`） | 低 Fast and efficient | 1 | 最快，适合短问答 |
+| `medium` | 中 深度适中 | 4 | 服务端内部思考，不吐思考链 |
+| `high` | 高 超级详尽 | 2 | 付费号会返回思考链 |
+
+- 也接受 `thinking_effort` / `think_effort` 两个别名，以及直接写线值 `1` / `4` / `2`。
+- 不传就用该模型默认档（1）。
+- 别名照旧：`gemini-4-carbon` / `gemini-4-pro` 都指 4 Argon 这条路由；不认识的模型名直接返回 400，不会偷偷换成别的模型。
+
+```bash
+curl https://your-host/v1/chat/completions \
+  -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+  -d '{"model":"gemini-4-argon","reasoning_effort":"high","messages":[{"role":"user","content":"你好"}]}'
+```
+
+> [!NOTE]
+> 4 Argon 走的是档位 8，服务端会自动补 `inner[49]=40` 等槽位，否则付费号上请求会挂到超时；代价是这一档拿不到 High 思考链。想要思考链用 `gemini-4-hydrogen` + `reasoning_effort: "high"`。
 
 ## 使用 Docker 运行（推荐）
 
@@ -166,7 +175,7 @@ docker-compose up -d --build
 
 - `GET /`: 服务状态检查
 - `GET /v1/models`: 获取可用模型列表
-- `POST /v1/chat/completions`: 与模型聊天 (类似 OpenAI 接口)
+- `POST /v1/chat/completions`: 与模型聊天（OpenAI 兼容，支持 `stream` 与 `reasoning_effort`）
 - `GET /gemini-proxy/image`: 图片代理接口（有生成图片需求时，需要保证此端点可直接访问，如果使用反向代理则需要填写 `PUBLIC_BASE_URL` 环境变量）
 - `GET /admin`: 管理面板
 
