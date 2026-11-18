@@ -34,6 +34,12 @@ from gemini_webapi.constants import MODEL_HEADER_KEY
 from PIL import Image
 from pydantic import BaseModel
 
+from cookie_pool import (
+	CookieLease,
+	CookiePool,
+	CookiePoolUnavailable,
+	load_cookie_entries,
+)
 from gemini_models import (
 	BUILTIN_MODELS,
 	TIER_SUFFIXES,
@@ -67,6 +73,23 @@ set_log_level("INFO")
 gemini_client = None
 gemini_client_lock = asyncio.Lock()
 
+# 多 Cookie 轮询池：一个进程挂多个 Gemini 账号，请求轮询分配、失败自动换号
+gemini_pool = None
+gemini_pool_lock = asyncio.Lock()
+
+
+def _env_number(name: str, default, cast=float):
+	"""读一个数字型环境变量，写错就告警并回退默认值（别让一处拼写错误拖崩启动）。"""
+	raw = (os.environ.get(name) or "").strip()
+	if not raw:
+		return default
+	try:
+		return cast(raw)
+	except (TypeError, ValueError):
+		logger.warning("环境变量 %s=%r 不是合法数字，回退到 %s", name, raw, default)
+		return default
+
+
 # 服务配置（从环境变量读取，修改后需重启服务生效）
 HOST = os.environ.get("HOST", "0.0.0.0")
 try:
@@ -78,8 +101,16 @@ except ValueError:
 async def _init_gemini_client_background():
 	"""Background task: initialize the Gemini client without blocking startup."""
 	try:
+		pool = await get_gemini_pool()
 		await get_gemini_client()
-		logger.info("Gemini client initialized successfully in background")
+		if COOKIE_EAGER_INIT:
+			# 预热剩下的账号：启动时就把坏 Cookie 暴露出来，而不是等流量打上去
+			await pool.warm_up()
+		logger.info(
+			"Gemini client initialized successfully in background (cookie accounts=%s: %s)",
+			len(pool),
+			", ".join(pool.labels),
+		)
 	except Exception as e:
 		logger.warning(f"Gemini client init failed (service running without API access): {e}")
 
@@ -98,14 +129,15 @@ async def lifespan(app: FastAPI):
 				await init_task
 			except asyncio.CancelledError:
 				pass
-		global gemini_client
-		if gemini_client is not None:
+		global gemini_client, gemini_pool
+		pool = gemini_pool
+		gemini_pool = None
+		gemini_client = None
+		if pool is not None:
 			try:
-				await gemini_client.close()
+				await pool.close()
 			except Exception as e:
-				logger.warning(f"Failed to close Gemini client during shutdown: {e}")
-			finally:
-				gemini_client = None
+				logger.warning(f"Failed to close Gemini cookie pool during shutdown: {e}")
 
 
 app = FastAPI(title="Gemini API FastAPI Server", lifespan=lifespan)
@@ -185,6 +217,14 @@ TEMPORARY_CHAT = os.environ.get("TEMPORARY_CHAT", "false").lower() == "true"
 DISABLE_BUILTIN_MODELS = os.environ.get("DISABLE_BUILTIN_MODELS", "false").lower() == "true"
 AUTO_DELETE_CHAT = os.environ.get("AUTO_DELETE_CHAT", "true").lower() == "true" and not TEMPORARY_CHAT
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+
+# 多 Cookie 轮询调参：单账号并发上限（0=不限）、单次请求最多试几个号、失败冷却退避
+COOKIE_MAX_CONCURRENCY = max(0, int(_env_number("COOKIE_MAX_CONCURRENCY", 0, int)))
+COOKIE_MAX_RETRIES = max(0, int(_env_number("COOKIE_MAX_RETRIES", 0, int)))
+COOKIE_COOLDOWN_BASE = max(1.0, float(_env_number("COOKIE_COOLDOWN_BASE", 15.0)))
+COOKIE_COOLDOWN_MAX = max(COOKIE_COOLDOWN_BASE, float(_env_number("COOKIE_COOLDOWN_MAX", 300.0)))
+COOKIE_VALIDATE_ON_INIT = os.environ.get("COOKIE_VALIDATE_ON_INIT", "true").lower() == "true"
+COOKIE_EAGER_INIT = os.environ.get("COOKIE_EAGER_INIT", "false").lower() == "true"
 SECRET_FILE_PATH = os.path.join(os.path.dirname(__file__), "secrets", "proxy_secret")
 GEMINI_COOKIE_PATH = os.path.join(os.path.dirname(__file__), "secrets")
 SESSION_VALIDATION_PROMPT = "Reply with exactly OK."
@@ -874,10 +914,98 @@ def _tool_calls_to_fences(tool_calls: Optional[List[Dict[str, Any]]]) -> str:
 	return "\n".join(fences)
 
 
-# Dependency to get the initialized Gemini client
+async def get_gemini_pool() -> CookiePool:
+	"""懒初始化多 Cookie 轮询池（首次用到才解析配置）。"""
+	global gemini_pool
+	if gemini_pool is not None:
+		return gemini_pool
+
+	async with gemini_pool_lock:
+		if gemini_pool is not None:
+			return gemini_pool
+
+		entries = load_cookie_entries()
+		if not entries:
+			raise HTTPException(
+				status_code=500,
+				detail="Missing SECURE_1PSID/SECURE_1PSIDTS. 单账号填这两个，多账号用 GEMINI_COOKIES 或 COOKIES_FILE。",
+			)
+
+		gemini_pool = CookiePool(
+			entries,
+			install_shim=install_wire_shim,
+			validator=validate_gemini_client_session if COOKIE_VALIDATE_ON_INIT else None,
+			psidts_cache=load_cached_1psidts,
+			max_concurrency=COOKIE_MAX_CONCURRENCY,
+			cooldown_base=COOKIE_COOLDOWN_BASE,
+			cooldown_max=COOKIE_COOLDOWN_MAX,
+		)
+		logger.info(
+			"Cookie 池已装载 %s 个账号：%s",
+			len(entries),
+			", ".join(entry.name for entry in entries),
+		)
+		return gemini_pool
+
+
+async def acquire_lease(pool: CookiePool, tried: Optional[set] = None) -> CookieLease:
+	"""从池里借一个账号；池子彻底没号时回 503，让客户端稍后重试。"""
+	try:
+		return await pool.acquire(exclude=tried)
+	except CookiePoolUnavailable as e:
+		raise HTTPException(status_code=503, detail=f"Gemini 账号全部不可用：{e}")
+
+
+async def generate_with_cookie_pool(pool: CookiePool, conversation: str, gen_kwargs: Dict[str, Any], model_spec: ModelSpec) -> tuple:
+	"""非流式生成：借账号 → 失败换号重试 → 返回 (response, client)。"""
+	budget = COOKIE_MAX_RETRIES or pool.retry_budget
+	attempts = max(1, min(budget, pool.retry_budget))
+	tried: set = set()
+	last_error: Optional[BaseException] = None
+
+	for attempt in range(1, attempts + 1):
+		lease = await acquire_lease(pool, tried)
+		tried.add(lease.psid)
+		try:
+			with active_model_spec(model_spec):
+				response = await lease.client.generate_content(conversation, **gen_kwargs)
+			lease.succeed()
+			return response, lease.client
+		except Exception as e:
+			last_error = e
+			lease.fail(e)
+			logger.warning(
+				"账号 %s 生成失败（%s/%s），换号重试：%s",
+				lease.label,
+				attempt,
+				attempts,
+				e,
+			)
+		finally:
+			lease.release()
+
+	if last_error is not None:
+		raise last_error
+	raise RuntimeError("cookie pool exhausted without response")
+
+
+async def reset_gemini_pool() -> None:
+	"""关掉池里所有客户端并丢弃，下次请求按最新配置重建。"""
+	global gemini_pool, gemini_client
+	pool = gemini_pool
+	gemini_pool = None
+	gemini_client = None
+	if pool is not None:
+		await pool.close()
+	logger.info("Cookie 池已重置")
+
+
 async def get_gemini_client():
 	"""
-	Get or initialize the global GeminiClient instance.
+	Get an initialized GeminiClient (whichever cookie pool account is idlest).
+
+	这个入口保留给管理面板 / Gem 管理 / 图片代理这类旁路调用；对话请求走
+	acquire_lease()，借出的账号会真正计入负载并参与轮询。
 
 	Raises:
 		HTTPException: If initialization fails due to invalid parameters or connection issues.
@@ -886,65 +1014,13 @@ async def get_gemini_client():
 	if gemini_client is not None:
 		return gemini_client
 
-	async with gemini_client_lock:
-		if gemini_client is not None:
-			return gemini_client
-
-		try:
-			psid = SECURE_1PSID
-			cached_psidts = load_cached_1psidts(psid)
-			attempts = []
-
-			if cached_psidts:
-				attempts.append(("cache", cached_psidts))
-			if SECURE_1PSIDTS:
-				attempts.append(("environment", SECURE_1PSIDTS))
-
-			seen_psidts = set()
-			new_attempts = []
-			for source, psidts in attempts:
-				if not psidts or psidts in seen_psidts:
-					continue
-				seen_psidts.add(psidts)
-				new_attempts.append((source, psidts))
-			attempts = new_attempts
-
-			if not attempts:
-				raise HTTPException(
-					status_code=500,
-					detail="Missing SECURE_1PSIDTS and no cached rotated 1PSIDTS is available",
-				)
-
-			last_error = None
-			for source, psidts in attempts:
-				tmp_client = None
-				try:
-					logger.info("Initializing Gemini client using %s credentials", source)
-
-					tmp_client = GeminiClient(psid, psidts)
-					await tmp_client.init(timeout=300)
-					# 装上模型改写层：Gemini 4 的档位/思考档/专用槽位在这里落到线上
-					install_wire_shim(tmp_client)
-					await validate_gemini_client_session(tmp_client, source)
-
-					gemini_client = tmp_client
-					break
-				except Exception as e:
-					last_error = e
-					logger.warning(f"Gemini session setup failed using {source} 1PSIDTS: {e}")
-					if tmp_client is not None:
-						try:
-							await tmp_client.close()
-						except Exception:
-							pass
-
-			if gemini_client is None:
-				raise last_error
-
-		except Exception as e:
-			logger.error(f"Failed to initialize Gemini client: {str(e)}")
-			raise HTTPException(status_code=500, detail=f"Failed to initialize Gemini client: {str(e)}")
-	return gemini_client
+	pool = await get_gemini_pool()
+	lease = await acquire_lease(pool)
+	try:
+		gemini_client = lease.client
+		return gemini_client
+	finally:
+		lease.release()
 
 
 def get_image_signature(url: str) -> str:
@@ -986,9 +1062,7 @@ async def create_chat_completion(
 	and background conversation cleanup based on configuration.
 	"""
 	try:
-		# 确保客户端已初始化
-		global gemini_client
-		gemini_client = await get_gemini_client()
+		# 多 Cookie 轮询：账号按请求从池里借，不再全局共用一份
 
 		# 转换消息为对话格式（启用 Gem 时跳过 system 消息）
 		conversation, temp_files = prepare_conversation(
@@ -1047,14 +1121,20 @@ async def create_chat_completion(
 			gen_kwargs["files"] = temp_files
 		if GEM_ID:
 			gen_kwargs["gem"] = GEM_ID
-		if model_spec.extended_thinking and _supports_extended_thinking(gemini_client):
+		if model_spec.extended_thinking and _supports_extended_thinking(GeminiClient):
 			gen_kwargs["extended_thinking"] = True
 
+		# 多 Cookie 轮询：流式要占住一个账号，非流式要能失败换号，所以借号分别放在各自分支里
+		pool = await get_gemini_pool()
+
 		if request.stream:
+			lease = await acquire_lease(pool)
+			gemini_client = lease.client
 			# Real streaming using upstream generate_content_stream
 			async def generate_stream():
 				# 流式生成在 StreamingResponse 自己的任务里跑，模型规格必须在这里挂上
 				spec_token = gemini_wire_push_spec(model_spec)
+				stream_failed = False
 				try:
 
 					def make_chunk(delta: dict, finish_reason=None):
@@ -1200,6 +1280,9 @@ async def create_chat_completion(
 						asyncio.create_task(background_verify_chat_persistence(gemini_client, last_metadata[0], "stream"))
 				except Exception as e:
 					logger.error(f"Error during streaming: {str(e)}", exc_info=True)
+					# 这个账号这次失败了：进冷却，下次请求换号
+					stream_failed = True
+					lease.fail(e)
 					# Send error as a content chunk so the client sees it
 					error_msg = "\n\n[An internal error occurred while streaming]"
 					yield make_chunk({"content": error_msg})
@@ -1207,6 +1290,11 @@ async def create_chat_completion(
 					yield "data: [DONE]\n\n"
 				finally:
 					gemini_wire_pop_spec(spec_token)
+
+					# 账号用完即归还：占位归零；这一轮没报错就记一次成功（清零失败退避）
+					if not stream_failed:
+						lease.succeed()
+					lease.release()
 
 					# Create background task to delete the chat if AUTO_DELETE_CHAT is enabled
 					if AUTO_DELETE_CHAT and captured_cid:
@@ -1221,10 +1309,9 @@ async def create_chat_completion(
 
 			return StreamingResponse(generate_stream(), media_type="text/event-stream")
 		else:
-			# Non-streaming response
+			# Non-streaming response：借号 / 换号重试 / 归还都在 generate_with_cookie_pool 里
 			try:
-				with active_model_spec(model_spec):
-					response = await gemini_client.generate_content(conversation, **gen_kwargs)
+				response, gemini_client = await generate_with_cookie_pool(pool, conversation, gen_kwargs, model_spec)
 
 				if AUTO_DELETE_CHAT and hasattr(response, "metadata") and response.metadata and len(response.metadata) > 0:
 					cid = response.metadata[0]
@@ -1358,9 +1445,11 @@ async def proxy_image(url: str, sig: str):
 	# Use scoped cookies to prevent leakage during redirects
 	jar = httpx.Cookies()
 
-	# Use the freshest available 1PSIDTS without overriding env cookies up front.
-	psid = SECURE_1PSID
-	psidts = get_cookie_value(getattr(gemini_client, "cookies", None), "__Secure-1PSIDTS") or load_cached_1psidts(psid) or SECURE_1PSIDTS
+	# 多 Cookie：优先用池里现成的账号（主账号可能已经掉线），拿不到再退回环境变量
+	cookie_client = gemini_pool.primary_client() if gemini_pool is not None else None
+	cookie_client = cookie_client or gemini_client
+	psid = get_cookie_value(getattr(cookie_client, "cookies", None), "__Secure-1PSID") or SECURE_1PSID
+	psidts = get_cookie_value(getattr(cookie_client, "cookies", None), "__Secure-1PSIDTS") or load_cached_1psidts(psid) or SECURE_1PSIDTS
 
 	jar.set("__Secure-1PSID", psid, domain=".google.com")
 	jar.set("__Secure-1PSIDTS", psidts, domain=".google.com")

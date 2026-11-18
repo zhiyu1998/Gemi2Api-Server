@@ -206,10 +206,15 @@ async def verify_admin_token(request: Request):
 @router.get("/api/status")
 async def get_status(token: str = Depends(verify_admin_token)):
 	"""获取服务状态"""
+	import main
 	from main import API_KEY, AUTO_DELETE_CHAT, DISABLE_BUILTIN_MODELS, ENABLE_THINKING, GEM_ID, HOST, PORT, SECURE_1PSID, SECURE_1PSIDTS, TEMPORARY_CHAT
 
 	# 检查 cookie 是否有效（简单检查是否存在）
 	cookie_valid = bool(SECURE_1PSID and SECURE_1PSIDTS)
+
+	# 多 Cookie 轮询池状态（没初始化就给空列表，不在这儿主动发请求）
+	pool = getattr(main, "gemini_pool", None)
+	pool_rows = pool.snapshot() if pool is not None else []
 
 	# 计算平均响应时间
 	avg_response_time = 0
@@ -231,6 +236,8 @@ async def get_status(token: str = Depends(verify_admin_token)):
 		"port": PORT,
 		"api_key_enabled": bool(API_KEY),
 		"cookie_valid": cookie_valid,
+		"cookie_count": len(pool_rows) or (1 if cookie_valid else 0),
+		"cookie_accounts": pool_rows,
 		"secure_1psid_masked": mask_cookie(SECURE_1PSID),
 		"secure_1psidts_masked": mask_cookie(SECURE_1PSIDTS),
 		"thinking_enabled": ENABLE_THINKING,
@@ -392,6 +399,9 @@ async def update_cookies(cookies: CookieUpdate, token: str = Depends(verify_admi
 	main.SECURE_1PSID = cookies.secure_1psid
 	main.SECURE_1PSIDTS = cookies.secure_1psidts
 
+	# 池子里的旧客户端作废：下次请求按新 Cookie 重建
+	await main.reset_gemini_pool()
+
 	return {"success": True, "message": "Cookie 已保存并生效"}
 
 
@@ -415,14 +425,8 @@ async def save_cookies_and_reinit(cookies: CookieUpdate, token: str = Depends(ve
 	main.SECURE_1PSID = cookies.secure_1psid
 	main.SECURE_1PSIDTS = cookies.secure_1psidts
 
-	# 重新初始化客户端
-	async with main.gemini_client_lock:
-		if main.gemini_client is not None:
-			try:
-				await main.gemini_client.close()
-			except Exception:
-				pass
-			main.gemini_client = None
+	# 重新初始化：关掉池里全部客户端，再按新配置重建
+	await main.reset_gemini_pool()
 
 	try:
 		client = await main.get_gemini_client()
@@ -439,14 +443,8 @@ async def reinit_client(token: str = Depends(verify_admin_token)):
 	"""重新初始化 Gemini 客户端"""
 	import main
 
-	# 在锁内关闭旧客户端，避免竞态
-	async with main.gemini_client_lock:
-		if main.gemini_client is not None:
-			try:
-				await main.gemini_client.close()
-			except Exception:
-				pass
-			main.gemini_client = None
+	# 关掉池里全部客户端，再按当前配置重建
+	await main.reset_gemini_pool()
 
 	# 尝试重新初始化（get_gemini_client 内部也会获取锁）
 	try:

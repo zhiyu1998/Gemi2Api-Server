@@ -934,6 +934,128 @@
         @media (prefers-reduced-motion: reduce) {
             *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
         }
+
+        /* Gemini Cookie 账号池 */
+        .cookie-pool-section {
+            margin-top: 16px;
+            padding-top: 14px;
+            border-top: 1px solid var(--border);
+        }
+        .cookie-pool-heading {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 10px;
+        }
+        .cookie-pool-title {
+            color: var(--text);
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .cookie-pool-count {
+            padding: 2px 8px;
+            border-radius: 999px;
+            background: var(--primary-soft);
+            color: var(--primary);
+            font-size: 10px;
+            white-space: nowrap;
+        }
+        .cookie-pool-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            min-width: 0;
+        }
+        .cookie-pool-list.is-scrollable {
+            max-height: 280px;
+            padding-right: 4px;
+            overflow-y: auto;
+        }
+        .cookie-pool-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            min-width: 0;
+            padding: 10px 12px;
+            border: 1px solid var(--border);
+            border-radius: 9px;
+            background: var(--surface-soft);
+        }
+        .cookie-pool-list.is-compact .cookie-pool-row { padding: 7px 10px; }
+        .cookie-pool-main { flex: 1 1 180px; min-width: 0; }
+        .cookie-pool-label {
+            color: var(--text);
+            font-size: 12px;
+            font-weight: 550;
+            overflow-wrap: anywhere;
+        }
+        .cookie-pool-psid {
+            margin-top: 3px;
+            color: var(--text-muted);
+            font-family: "SFMono-Regular", Consolas, monospace;
+            font-size: 11px;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+        .cookie-pool-side,
+        .cookie-pool-status-group,
+        .cookie-pool-metrics {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .cookie-pool-side { flex: 0 0 auto; justify-content: flex-end; gap: 10px; }
+        .cookie-pool-status-group { gap: 7px; }
+        .cookie-pool-badge {
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-size: 10px;
+            line-height: 1.5;
+            white-space: nowrap;
+        }
+        .cookie-pool-badge.is-normal { background: rgba(67, 214, 158, .12); color: var(--success); }
+        .cookie-pool-badge.is-cooling { background: rgba(245, 185, 76, .12); color: var(--warning); }
+        .cookie-pool-badge.is-uninitialized { background: rgba(104, 120, 141, .12); color: var(--text-muted); }
+        .cookie-pool-badge.is-error { background: rgba(255, 107, 120, .12); color: var(--danger); }
+        .cookie-pool-failure {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            color: var(--danger);
+            font-size: 10px;
+            white-space: nowrap;
+        }
+        .cookie-pool-failure::before {
+            content: "";
+            width: 5px;
+            height: 5px;
+            border-radius: 50%;
+            background: var(--danger);
+        }
+        .cookie-pool-metrics {
+            gap: 10px;
+            color: var(--text-secondary);
+            font-size: 11px;
+            white-space: nowrap;
+        }
+        .cookie-pool-empty {
+            padding: 9px 11px;
+            border: 1px dashed var(--border);
+            border-radius: 8px;
+            color: var(--text-muted);
+            font-size: 11px;
+        }
+        @media (max-width: 960px) {
+            .cookie-pool-row { flex-wrap: wrap; }
+            .cookie-pool-main { flex-basis: 100%; }
+            .cookie-pool-side {
+                width: 100%;
+                justify-content: space-between;
+                flex-wrap: wrap;
+            }
+        }
     </style>
 </head>
 <body>
@@ -1098,6 +1220,15 @@
                     </div>
                 </div>
                 <div id="cookieMessage" class="inline-message" style="margin-top: 12px; display: none; padding: 10px; border-radius: 8px;"></div>
+                <section class="cookie-pool-section" id="cookiePool" aria-labelledby="cookiePoolTitle">
+                    <div class="cookie-pool-heading">
+                        <span class="cookie-pool-title" id="cookiePoolTitle">账号池</span>
+                        <span class="cookie-pool-count" id="cookiePoolCount">--</span>
+                    </div>
+                    <div class="cookie-pool-list" id="cookiePoolList">
+                        <div class="cookie-pool-empty">--</div>
+                    </div>
+                </section>
             </div>
         </section>
 
@@ -1420,11 +1551,93 @@
             }
         });
 
+        // 渲染 Cookie 轮询账号池
+        function renderCookieAccounts(data) {
+            const list = document.getElementById('cookiePoolList');
+            const count = document.getElementById('cookiePoolCount');
+            list.replaceChildren();
+            list.classList.remove('is-compact', 'is-scrollable');
+
+            const createElement = (tag, className, text) => {
+                const element = document.createElement(tag);
+                if (className) element.className = className;
+                if (text !== undefined) element.textContent = String(text);
+                return element;
+            };
+
+            // 请求失败时保留区块结构，并明确显示不可用状态
+            if (!data || typeof data !== 'object') {
+                count.textContent = '--';
+                list.appendChild(createElement('div', 'cookie-pool-empty', '--'));
+                return;
+            }
+
+            const accounts = Array.isArray(data.cookie_accounts) ? data.cookie_accounts : [];
+            const configuredCount = Number(data.cookie_count);
+            const accountCount = accounts.length || (Number.isFinite(configuredCount) ? configuredCount : 0);
+            count.textContent = `${accountCount} 个账号`;
+
+            if (accounts.length === 0) {
+                list.appendChild(createElement('div', 'cookie-pool-empty', '单账号模式'));
+                return;
+            }
+
+            list.classList.toggle('is-compact', accounts.length === 1);
+            list.classList.toggle('is-scrollable', accounts.length > 4);
+
+            accounts.forEach((account, index) => {
+                const initialized = account.initialized === true;
+                const failures = Math.max(0, Number(account.failures) || 0);
+                const coolingSeconds = Math.max(0, Number(account.cooling_down_seconds) || 0);
+                const inflight = Math.max(0, Number(account.inflight) || 0);
+                const successes = Math.max(0, Number(account.successes) || 0);
+                const lastError = account.last_error ? String(account.last_error) : '';
+
+                const row = createElement('div', 'cookie-pool-row');
+                const main = createElement('div', 'cookie-pool-main');
+                const label = account.label || account.psid_masked || `账号 ${index + 1}`;
+                main.appendChild(createElement('div', 'cookie-pool-label', label));
+                main.appendChild(createElement('div', 'cookie-pool-psid', account.psid_masked || '--'));
+
+                const side = createElement('div', 'cookie-pool-side');
+                const statusGroup = createElement('div', 'cookie-pool-status-group');
+                let statusText = '正常';
+                let statusClass = 'is-normal';
+                if (coolingSeconds > 0) {
+                    statusText = `冷却中 ${Math.ceil(coolingSeconds)}s`;
+                    statusClass = 'is-cooling';
+                } else if (!initialized) {
+                    statusText = '未初始化';
+                    statusClass = 'is-uninitialized';
+                } else if (failures > 0) {
+                    statusText = '异常';
+                    statusClass = 'is-error';
+                }
+                statusGroup.appendChild(createElement('span', `cookie-pool-badge ${statusClass}`, statusText));
+
+                if (failures > 0) {
+                    const failure = createElement('span', 'cookie-pool-failure', `失败 ${failures} 次`);
+                    failure.title = lastError || '最近一次请求失败';
+                    statusGroup.appendChild(failure);
+                }
+
+                const metrics = createElement('div', 'cookie-pool-metrics');
+                metrics.appendChild(createElement('span', '', `在途 ${inflight}`));
+                metrics.appendChild(createElement('span', '', `成功 ${successes}`));
+                side.appendChild(statusGroup);
+                side.appendChild(metrics);
+                row.appendChild(main);
+                row.appendChild(side);
+                list.appendChild(row);
+            });
+        }
+
         // 获取服务状态
         async function fetchStatus() {
             try {
                 const res = await authFetch(`${API_BASE}/status`);
                 const data = await res.json();
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 
                 document.getElementById('uptime').textContent = data.uptime || '--';
                 document.getElementById('totalRequests').textContent = data.total_requests || 0;
@@ -1440,6 +1653,7 @@
                 document.getElementById('currentPort').textContent = data.port || '--';
                 document.getElementById('apiKeyStatus').textContent = data.api_key_enabled ? '已启用' : '未设置';
                 document.getElementById('cookieStatus').textContent = data.cookie_valid ? '有效' : '无效';
+                renderCookieAccounts(data);
                 
                 // 显示脱敏的 Cookie 值
                 document.getElementById('cookie1psid').placeholder = data.secure_1psid_masked || '粘贴 __Secure-1PSID 的值';
@@ -1459,6 +1673,7 @@
                 document.getElementById('statusText').textContent = data.running ? '运行中' : '已停止';
             } catch (e) {
                 console.error('获取状态失败:', e);
+                renderCookieAccounts(null);
                 document.getElementById('statusDot').style.background = '#f44336';
                 document.getElementById('statusText').textContent = '连接失败';
             }

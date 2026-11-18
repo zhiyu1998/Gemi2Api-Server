@@ -20,3 +20,6 @@ custom_models.yaml
 # 测试：源码入库，只忽略缓存
 tests/__pycache__/
 .pytest_cache/
+
+# 本地代理/会话临时目录
+.deja/
