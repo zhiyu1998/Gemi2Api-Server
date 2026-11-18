@@ -158,12 +158,21 @@ def dedupe_entries(entries: Sequence[CookieEntry]) -> List[CookieEntry]:
 	return unique
 
 
-def load_cookie_entries() -> List[CookieEntry]:
-	"""合并环境变量与 cookie 文件，得到本次进程要轮询的账号列表。"""
+def load_cookie_entries(single: Optional[tuple] = None) -> List[CookieEntry]:
+	"""合并环境变量与 cookie 文件，得到本次进程要轮询的账号列表。
+
+	``single`` 传入运行时单账号 (1PSID, 1PSIDTS) 时优先用它，而不是读 os.environ：
+	管理面板保存 Cookie 只更新了 main 的模块变量（没写 os.environ），池子按环境变量
+	重建会拿到旧值，这条参数就是为了让「面板改完立刻生效」成立。
+	"""
 	entries: List[CookieEntry] = []
 
-	psid = (os.environ.get("SECURE_1PSID") or "").strip()
-	psidts = (os.environ.get("SECURE_1PSIDTS") or "").strip()
+	if single is None:
+		psid = (os.environ.get("SECURE_1PSID") or "").strip()
+		psidts = (os.environ.get("SECURE_1PSIDTS") or "").strip()
+	else:
+		psid = (single[0] or "").strip()
+		psidts = (single[1] or "").strip()
 	if psid and psidts:
 		entries.append(CookieEntry(psid, psidts, "environment"))
 
@@ -354,18 +363,23 @@ class CookiePool:
 		raise CookiePoolUnavailable(f"没有可用的 Gemini 账号：{detail}")
 
 	async def _psidts_attempts(self, slot: ClientSlot) -> List[tuple]:
-		"""先试缓存的轮换后 1PSIDTS，再试配置里的值（去重）。"""
+		"""先试配置里的 1PSIDTS，再试缓存（去重）。
+
+		顺序不能反：缓存文件是历史遗留的只读产物（没有写入方），用户重新贴了新 Cookie
+		却先拿旧缓存去 init，503/401 全挂在旧值上，表现就是「新 cookie 明明是对的却报过期」。
+		"""
 		attempts: List[tuple] = []
+		if slot.entry.psidts:
+			attempts.append(("configuration", slot.entry.psidts))
+
 		cached = ""
 		if self.psidts_cache is not None:
 			try:
 				cached = (self.psidts_cache(slot.entry.psid) or "").strip()
 			except Exception as e:
 				logger.warning("读取账号 %s 的 1PSIDTS 缓存失败：%s", slot.entry.name, e)
-		if cached:
+		if cached and cached != slot.entry.psidts:
 			attempts.append(("cache", cached))
-		if slot.entry.psidts and slot.entry.psidts != cached:
-			attempts.append(("configuration", slot.entry.psidts))
 		return attempts
 
 	async def _ensure_client(self, slot: ClientSlot) -> GeminiClient:

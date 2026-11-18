@@ -924,7 +924,8 @@ async def get_gemini_pool() -> CookiePool:
 		if gemini_pool is not None:
 			return gemini_pool
 
-		entries = load_cookie_entries()
+		# 传运行时变量而不是只读 os.environ：管理面板保存 Cookie 后能立刻生效
+		entries = load_cookie_entries(single=(SECURE_1PSID, SECURE_1PSIDTS))
 		if not entries:
 			raise HTTPException(
 				status_code=500,

@@ -398,6 +398,9 @@ async def update_cookies(cookies: CookieUpdate, token: str = Depends(verify_admi
 
 	main.SECURE_1PSID = cookies.secure_1psid
 	main.SECURE_1PSIDTS = cookies.secure_1psidts
+	# 同步进进程环境：池子/图片代理都有读 os.environ 的路径，只改模块变量会拿到旧值
+	os.environ["SECURE_1PSID"] = cookies.secure_1psid
+	os.environ["SECURE_1PSIDTS"] = cookies.secure_1psidts
 
 	# 池子里的旧客户端作废：下次请求按新 Cookie 重建
 	await main.reset_gemini_pool()
@@ -424,6 +427,9 @@ async def save_cookies_and_reinit(cookies: CookieUpdate, token: str = Depends(ve
 
 	main.SECURE_1PSID = cookies.secure_1psid
 	main.SECURE_1PSIDTS = cookies.secure_1psidts
+	# 同上：环境变量也要跟着改，否则重置后的池子还会读到旧 Cookie
+	os.environ["SECURE_1PSID"] = cookies.secure_1psid
+	os.environ["SECURE_1PSIDTS"] = cookies.secure_1psidts
 
 	# 重新初始化：关掉池里全部客户端，再按新配置重建
 	await main.reset_gemini_pool()
