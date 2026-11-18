@@ -56,6 +56,31 @@ jobs:
             exit 1
           fi
 
+      # 这个仓库直接把 commit 推到 main、不走 PR，所以 GitHub 的自动 notes 只有一个
+      # Full Changelog 链接；这里按上一个 tag 区间自己列 commit。
+      - name: 生成变更说明
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          prev="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)"
+          {
+            echo "OpenAI 兼容的 Gemini 网页版网关。部署方式见 README：Docker / Render / HuggingFace / 直接运行。"
+            echo
+            if [ -n "$prev" ]; then
+              echo "## 变更（${prev} → ${TAG}）"
+            else
+              echo "## 变更"
+            fi
+            echo
+            if [ -n "$prev" ]; then
+              git log --no-merges --pretty='* %s（%h）' "${prev}..${TAG}"
+            else
+              git log --no-merges --pretty='* %s（%h）' -n 30 "${TAG}"
+            fi
+          } > release-notes.md
+          echo "--- release-notes.md ---"
+          cat release-notes.md
+
       - name: 发布 Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -68,5 +93,5 @@ jobs:
           gh release create "$TAG" \
             --verify-tag \
             --title "$TAG" \
-            --generate-notes \
-            --notes "OpenAI 兼容的 Gemini 网页版网关。部署方式见 README：Docker / Render / HuggingFace / 直接运行。"
+            --notes-file release-notes.md \
+            --generate-notes
