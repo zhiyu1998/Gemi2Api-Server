@@ -362,6 +362,136 @@ async def fetch_readable_chat_response(client: GeminiClient, cid: str, retry_del
 	return None
 
 
+_TASK_FILE_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _json_dig(value: Any, path, default=None):
+	"""安全地从嵌套 list/dict 里取值（协议 JSON 经常缺字段或类型不同）。"""
+	current = value
+	for key in path:
+		try:
+			if isinstance(current, dict):
+				current = current.get(str(key))
+			elif isinstance(current, list):
+				current = current[key]
+			else:
+				return default
+		except (KeyError, IndexError, TypeError):
+			return default
+		if current is None:
+			return default
+	return current
+
+
+def _walk_file_entries(value):
+	"""递归找生成文件条目：形如 [.., 文件名, .., 下载地址列表, .., MIME]。"""
+	if isinstance(value, list):
+		if (
+			len(value) >= 12
+			and isinstance(value[2], str) and value[2]
+			and isinstance(value[11], str) and "/" in value[11]
+			and isinstance(value[7], list)
+			and any(isinstance(u, str) and u.startswith("http") for u in value[7])
+		):
+			yield value
+		for item in value:
+			yield from _walk_file_entries(item)
+	elif isinstance(value, dict):
+		for item in value.values():
+			yield from _walk_file_entries(item)
+
+
+async def _cache_task_file(client: GeminiClient, attachment: Dict[str, Any]) -> None:
+	"""用生成请求同一个会话立刻下载文件（Google 的文件链接对会话/时效敏感）。"""
+	try:
+		response = await client.client.get(
+			attachment["url"],
+			headers={"Origin": "https://gemini.google.com", "Referer": "https://gemini.google.com/", "Accept": "*/*"},
+		)
+		content = getattr(response, "content", b"") or b""
+		content_type = (response.headers.get("content-type") or "").lower()
+		if response.status_code == 200 and len(content) > 1000 and "text/html" not in content_type:
+			token = uuid.uuid4().hex
+			if len(_TASK_FILE_CACHE) > 32:
+				_TASK_FILE_CACHE.clear()
+			_TASK_FILE_CACHE[token] = {"name": attachment["name"], "mime": attachment["mime"], "data": content}
+			attachment["token"] = token
+		else:
+			logger.warning("Task 文件下载失败：status=%s type=%s size=%s", response.status_code, content_type, len(content))
+	except Exception as e:
+		logger.warning("Task 文件下载异常：%s", e)
+
+
+async def fetch_task_attachments(client: GeminiClient, cid: str) -> List[Dict[str, Any]]:
+	"""读取 Task 轮次里的生成文件（PDF/文档等）。"""
+	if not cid:
+		return []
+	try:
+		from gemini_webapi.constants import GRPC
+		from gemini_webapi.types import RPCData
+		from gemini_webapi.utils import extract_json_from_response
+	except Exception:
+		return []
+	try:
+		response = await client._batch_execute(
+			[RPCData(rpcid=GRPC.LIST_CONVERSATION_TURNS, payload=json.dumps([cid, 3, None, 1, [1], [4], None, 1]))],
+			source_path="/app",
+		)
+		parts = extract_json_from_response(response.text)
+	except Exception as e:
+		logger.warning("Task 附件读取失败：%s", e)
+		return []
+	attachments: List[Dict[str, Any]] = []
+	seen = set()
+	for part in parts or []:
+		body_raw = _json_dig(part, [2])
+		if not body_raw:
+			continue
+		try:
+			body = json.loads(body_raw)
+		except Exception:
+			continue
+		for conversation_turn in _json_dig(body, [0], []) or []:
+			for candidate in _json_dig(conversation_turn, [3, 0], []) or []:
+				for info in _walk_file_entries(candidate):
+					name = info[2]
+					urls = info[7]
+					url = urls[1] if len(urls) > 1 and isinstance(urls[1], str) else urls[0]
+					mime = info[11]
+					size = info[9][1] if isinstance(info[9], list) and len(info[9]) > 1 else None
+					if not url or url in seen:
+						continue
+					seen.add(url)
+					attachments.append({"name": str(name), "url": str(url), "mime": mime, "size": size})
+	for attachment in attachments:
+		await _cache_task_file(client, attachment)
+	logger.info("Task 附件：cid=%s 找到=%s 已缓存=%s", cid, len(attachments), sum(1 for a in attachments if a.get("token")))
+	return attachments
+
+
+def render_task_attachments(text: str, attachments: List[Dict[str, Any]], base_url: str) -> str:
+	"""把 [file-tag: 文件名] 替换成可下载链接；没有占位就追加在末尾。"""
+	if not attachments:
+		return text
+	result = text
+	links: List[str] = []
+	for attachment in attachments:
+		name = attachment["name"]
+		if attachment.get("token"):
+			link_url = f"{base_url}/gemini-proxy/taskfile?token={attachment['token']}"
+		else:
+			# 直链：浏览器里保有同一个 Google 登录态时能直接下载
+			link_url = attachment["url"]
+		links.append(f"[📎 {name}]({link_url})")
+		placeholder = f"[file-tag: {name}]"
+		if placeholder in result:
+			result = result.replace(placeholder, links[-1])
+	for link in links:
+		if link not in result:
+			result += chr(10) + chr(10) + link
+	return result
+
+
 async def background_verify_chat_persistence(client: GeminiClient, cid: str, source: str):
 	"""Best-effort verification that a returned cid is readable from Gemini history."""
 	if not cid:
@@ -1358,6 +1488,12 @@ async def create_chat_completion(
 						if recovered and getattr(recovered, "text", ""):
 							yield make_chunk({"content": postprocess_text(recovered.text)})
 
+					# Task 生成的文件：补在流末尾，给出可下载链接
+					if model_spec.feature and last_metadata:
+						task_attachments = await fetch_task_attachments(gemini_client, last_metadata[0])
+						if task_attachments:
+							yield make_chunk({"content": render_task_attachments("", task_attachments, base_url)})
+
 					# Send finish chunk（有工具调用时 finish_reason 必须是 tool_calls）
 					if stream_tool_calls:
 						yield make_chunk({"tool_calls": tool_calls_for_stream(stream_tool_calls)}, finish_reason="tool_calls")
@@ -1436,6 +1572,14 @@ async def create_chat_completion(
 					recovered = await fetch_readable_chat_response(gemini_client, task_cid, [2, 5, 10])
 					if recovered and getattr(recovered, "text", ""):
 						raw_text = recovered.text
+
+			# Task 生成的文件（PDF/文档）在会话稀疏键 59 里，转成本服务的下载链接
+			if model_spec.feature:
+				task_cid = response.metadata[0] if getattr(response, "metadata", None) else None
+				if task_cid:
+					task_attachments = await fetch_task_attachments(gemini_client, task_cid)
+					if task_attachments:
+						raw_text = render_task_attachments(raw_text, task_attachments, base_url)
 
 			# tools：把 ```tool_call``` 围栏解析成 OpenAI 的 tool_calls
 			tool_calls: List[Dict[str, Any]] = []
@@ -1609,6 +1753,87 @@ async def proxy_image(url: str, sig: str):
 			raise
 		except Exception as e:
 			logger.error(f"Proxy error: {str(e)}")
+			raise HTTPException(status_code=500, detail="Internal proxy error")
+
+
+@app.get("/gemini-proxy/taskfile")
+async def proxy_task_file(token: str):
+	item = _TASK_FILE_CACHE.get(token)
+	if not item:
+		raise HTTPException(status_code=404, detail="file not found or expired")
+	return Response(
+		content=item["data"],
+		media_type=item["mime"],
+		headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(item['name'])}", "Access-Control-Allow-Origin": "*"},
+	)
+
+
+@app.get("/gemini-proxy/file")
+async def proxy_file(url: str, sig: str, name: str = "download"):
+	"""代理下载 Task 生成的文件（PDF/文档等），签名规则同图片代理。"""
+	expected_sig = get_image_signature(url)
+	if not hmac.compare_digest(sig, expected_sig):
+		raise HTTPException(status_code=403, detail="Invalid signature")
+
+	import mimetypes
+
+	allowed_domains = ["google.com", "googleusercontent.com", "gstatic.com"]
+	try:
+		parsed = urlparse(url)
+		hostname = (parsed.hostname or "").lower()
+		if parsed.scheme not in ["http", "https"] or not hostname:
+			raise HTTPException(status_code=400, detail="Invalid URL")
+		if not any(hostname == d or hostname.endswith("." + d) for d in allowed_domains):
+			raise HTTPException(status_code=403, detail="Domain not allowed")
+	except ValueError:
+		raise HTTPException(status_code=400, detail="Invalid URL")
+
+	jar = httpx.Cookies()
+	pool_client = gemini_pool.primary_client() if gemini_pool is not None else None
+	cookie_client = pool_client or gemini_client
+	psid = get_cookie_value(getattr(cookie_client, "cookies", None), "__Secure-1PSID") or SECURE_1PSID
+	psidts = get_cookie_value(getattr(cookie_client, "cookies", None), "__Secure-1PSIDTS") or load_cached_1psidts(psid) or SECURE_1PSIDTS
+	for domain in (".google.com", ".googleusercontent.com", ".usercontent.google.com"):
+		jar.set("__Secure-1PSID", psid, domain=domain)
+		jar.set("__Secure-1PSIDTS", psidts, domain=domain)
+
+	headers = {
+		"User-Agent": DEFAULT_USER_AGENT,
+		"Accept": "*/*",
+		"Accept-Language": "en-US,en;q=0.9",
+		"Referer": "https://gemini.google.com/",
+	}
+	max_bytes = 64 * 1024 * 1024
+	async with httpx.AsyncClient(http2=True, cookies=jar, follow_redirects=True) as client:
+		try:
+			async with client.stream("GET", url, timeout=60.0, headers=headers) as resp:
+				resp.raise_for_status()
+				content = bytearray()
+				async for chunk in resp.aiter_bytes():
+					content.extend(chunk)
+					if len(content) > max_bytes:
+						raise HTTPException(status_code=413, detail="File too large")
+				media_type = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+				if not media_type or media_type == "application/octet-stream":
+					media_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+				disposition = f"attachment; filename*=UTF-8''{quote(name)}"
+				return Response(
+					content=bytes(content),
+					media_type=media_type,
+					headers={
+						"Content-Disposition": disposition,
+						"Cross-Origin-Resource-Policy": "cross-origin",
+						"Access-Control-Allow-Origin": "*",
+						"Cache-Control": "private, max-age=3600",
+						"X-Content-Type-Options": "nosniff",
+					},
+				)
+		except httpx.HTTPStatusError as e:
+			raise HTTPException(status_code=e.response.status_code, detail=f"Failed to fetch file: {e.response.status_code}")
+		except HTTPException:
+			raise
+		except Exception as e:
+			logger.error(f"File proxy error: {str(e)}")
 			raise HTTPException(status_code=500, detail="Internal proxy error")
 
 
