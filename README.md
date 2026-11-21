@@ -219,7 +219,7 @@ curl https://your-host/v1/chat/completions \
 > 4 Neon 走的是档位 3（`inner[79]=3`），接替原来 3.1 Pro 的位置，模型列表里显示为「Deeper analysis」。2026-11-19 在 Ultra 号上实测：普通档回报 `4 Neon`，`reasoning_effort: "high"` 回报 `4 Neon High` 并带 `reasoning_content`；免费号发档位 3 会挂到超时，所以这条路由要付费 / Ultra 账号的 cookie。`gemini-3.1-pro` 不再是下线模型，它和 `gemini-4-neon` 是同一条路由的两个名字。Neon 不是 Argon 的继任者：Argon 改名成了 Carbon，Neon 是另一个模型。
 
 > [!NOTE]
-> Task 生成的文件（PDF/文档）会出现在候选稀疏键 `"59"`，正文是 `[file-tag: 文件名]`。服务会把它替换成可点击的下载链接；生成请求同一会话内能下载成功时走本服务 `/gemini-proxy/taskfile?token=...`，否则退回 Google 原始直链（需要在已登录同一 Google 账号的浏览器里打开）。
+> Task 生成的文件（PDF/文档）正文里是 `[file-tag: 文件名]`。服务会把它替换成对应 Gemini 会话链接；用户在已登录同一 Google 账号的浏览器里打开会话，点文件预览的「导出 → 下载」即可。服务端不下载、不缓存文件，避免 Google 对 `contribution.usercontent.com` 的 403 限制。多账号可用 `GEMINI_WEB_AUTHUSER` 指定 `/u/N`。
 
 > [!NOTE]
 > Task 模型（`*-task`，官网「Task / 代为执行任务」）走 `featureMode 40`：请求写 `inner[49]=40`、`inner[83]=1`，并强制使用普通会话（不能临时会话）。首次使用前服务会自动写账号偏好 222、再发 `UVb0T` 条款（见 `gemini_task.py`）；长任务的回答可能先以「运行中」结束，服务会再从会话里读回正文。只有账号的 Task 菜单里出现对应模型时才真正生效。
