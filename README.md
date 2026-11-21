@@ -155,6 +155,33 @@ g.a000xxxxx,1PSIDTS的值,号4
 > [!NOTE]
 > 多个号必须是不同的 Google 账号；同一个 `1PSID` 只保留第一次出现的那份配置（例如同时写在 `SECURE_1PSID` 和 `GEMINI_COOKIES` 里时以环境变量为准）。
 
+## 支持的协议
+
+同一套模型与 Cookie 池对外提供四种协议（`protocols.py`）：
+
+| 协议 | 端点 |
+| --- | --- |
+| OpenAI Chat Completions | `POST /v1/chat/completions` |
+| OpenAI Responses | `POST /v1/responses`（含 `stream` SSE 事件） |
+| Anthropic Messages | `POST /v1/messages`、`POST /v1/messages/count_tokens`（`x-api-key` 或 Bearer） |
+| Gemini 原生 | `POST /v1beta/models/{model}:generateContent`、`:streamGenerateContent`（`alt=sse` 走 SSE，否则 JSON 数组） |
+
+鉴权与 `/v1/chat/completions` 一致（`Authorization: Bearer $API_KEY`；Anthropic 也认 `x-api-key`）。文本、system/instructions、temperature/top_p、stop_sequences、tools（提示词围栏模拟）都已支持；图片/音乐/视频等富媒体仍走 chat 里的 `gemini-image` / `gemini-music` / `gemini-video` / `gemini-canvas`。
+
+```bash
+# Anthropic
+curl http://127.0.0.1:8001/v1/messages -H "x-api-key: $API_KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"gemini-4-hydrogen","max_tokens":128,"messages":[{"role":"user","content":"你好"}]}'
+
+# OpenAI Responses
+curl http://127.0.0.1:8001/v1/responses -H "Authorization: Bearer $API_KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"gemini-4-hydrogen","input":"你好"}'
+
+# Gemini 原生
+curl http://127.0.0.1:8001/v1beta/models/gemini-4-hydrogen:generateContent -H "Authorization: Bearer $API_KEY" \
+  -H 'Content-Type: application/json' -d '{"contents":[{"role":"user","parts":[{"text":"你好"}]}]}'
+```
+
 ## 模型与思考档
 
 `/v1/models` 返回的就是 `custom_models.yaml` 里这几条（配 `DISABLE_BUILTIN_MODELS="true"` 时不再追加内置模型）：

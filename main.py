@@ -155,6 +155,15 @@ from admin import router as admin_router, setup_middleware
 app.include_router(admin_router)
 setup_middleware(app)
 
+# 额外协议：OpenAI Responses / Anthropic Messages / Gemini 原生 generateContent
+def _register_extra_protocols() -> None:
+	from protocols import register_protocol_routes
+
+	register_protocol_routes(app)
+
+
+_register_extra_protocols()
+
 
 def get_gemini_webapi_version() -> str:
 	"""Return the installed gemini-webapi package version for runtime diagnostics."""
