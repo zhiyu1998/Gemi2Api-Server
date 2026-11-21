@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -165,6 +166,14 @@ async def _generate_text(model_name: str, prompt: str) -> tuple:
 	pool = await main.get_gemini_pool()
 	response, _client = await main.generate_with_cookie_pool(pool, prompt, _gen_kwargs(spec), spec)
 	text = getattr(response, "text", None) or ""
+	if spec.feature:
+		cid = response.metadata[0] if getattr(response, "metadata", None) else None
+		if not text.strip() and cid:
+			recovered = await main.fetch_readable_chat_response(_client, cid, [2, 5, 10])
+			if recovered and getattr(recovered, "text", ""):
+				text = recovered.text
+		if cid:
+			text = main.render_task_file_links(text, cid)
 	return spec, response, text
 
 
@@ -178,7 +187,28 @@ async def _stream_chunks(model_name: str, prompt: str) -> AsyncIterator[tuple]:
 	token = main.gemini_wire_push_spec(spec)
 	try:
 		if spec.feature:
+			# Task 上游流长时间只有 think 进度，客户端会断开；这里缓冲生成 + 心跳。
 			await main.ensure_task_ready(lease.client)
+			task = asyncio.create_task(lease.client.generate_content(prompt, **_gen_kwargs(spec)))
+			while not task.done():
+				done, _ = await asyncio.wait({task}, timeout=15)
+				if not done:
+					yield ("keepalive", None)
+			response = task.result()
+			cid = response.metadata[0] if getattr(response, "metadata", None) else None
+			text = getattr(response, "text", None) or ""
+			if not text.strip() and cid:
+				recovered = await main.fetch_readable_chat_response(lease.client, cid, [2, 5, 10])
+				if recovered and getattr(recovered, "text", ""):
+					text = recovered.text
+			if cid:
+				text = main.render_task_file_links(text, cid)
+			if getattr(response, "thoughts", None):
+				yield ("thinking", response.thoughts)
+			if text:
+				yield ("text", text)
+			lease.succeed()
+			return
 		async for chunk in lease.client.generate_content_stream(prompt, **_gen_kwargs(spec)):
 			metadata = getattr(chunk, "metadata", None)
 			if metadata:
@@ -252,6 +282,9 @@ def _register_anthropic(app: FastAPI) -> None:
 			collected = ""
 			try:
 				async for kind, payload in _stream_chunks(model_name, prompt):
+					if kind == "keepalive":
+						yield ": keepalive\n\n"
+						continue
 					if kind == "text":
 						collected += payload
 						yield _sse("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": payload}})
@@ -364,6 +397,9 @@ def _register_responses(app: FastAPI) -> None:
 			collected = ""
 			try:
 				async for kind, payload in _stream_chunks(model_name, prompt):
+					if kind == "keepalive":
+						yield ": keepalive\n\n"
+						continue
 					if kind == "text":
 						collected += payload
 						yield emit("response.output_text.delta", {"item_id": item_id, "output_index": 0, "content_index": 0, "delta": payload, "logprobs": []})

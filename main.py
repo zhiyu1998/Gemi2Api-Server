@@ -1319,6 +1319,7 @@ async def create_chat_completion(
 
 					# Send initial role chunk
 					yield make_chunk({"role": "assistant"})
+					captured_cid = None
 
 					# Task 模型内部强制走非流式：上游 Task 流的进度帧会长时间没有正文，
 					# 很多客户端等到 think 后就断开；这里用后台任务 + 心跳，最后一次性发结果和文件。
