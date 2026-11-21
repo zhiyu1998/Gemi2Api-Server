@@ -37,10 +37,10 @@ TEMPORARY_CHAT = "false" # 使用临时对话模式，此模式会禁用部分�
 AUTO_DELETE_CHAT = "true" # 生成结束后自动从web端删除对话记录，默认开启。TEMPORARY_CHAT为true时，此项无效。
 PUBLIC_BASE_URL = "https://your-domain.com" # 外部URL，用于生成图片代理链接，不填则会使用内部地址。使用反向代理时必填，否则可能导致图片无法访问。
 CUSTOM_MODELS_FILE = "custom_models.yaml" # 可选。用于覆写/新增 Gemini 模型定义，支持 YAML/JSON。
-DISABLE_BUILTIN_MODELS = "true" # 可选。设为 true 时，/v1/models 仅返回 CUSTOM_MODELS(_FILE) 中定义的模型，不再追加 gemini_webapi 内置模型（仓库自带配置用 true，对外只有 4 条路由）。此开关在服务启动时读取，修改 .env 后需重启生效（区别于 CUSTOM_MODELS_FILE 的免重启热加载）；也可在管理面板「功能开关」中切换，即时生效并写回 .env。
+DISABLE_BUILTIN_MODELS = "true" # 可选。设为 true 时，/v1/models 仅返回 CUSTOM_MODELS(_FILE) 中定义的模型，不再追加 gemini_webapi 内置模型（仓库自带配置用 true，对外只有 5 条路由）。此开关在服务启动时读取，修改 .env 后需重启生效（区别于 CUSTOM_MODELS_FILE 的免重启热加载）；也可在管理面板「功能开关」中切换，即时生效并写回 .env。
 ```
 
-`custom_models.yaml` 示例（仓库自带这份，配合 `DISABLE_BUILTIN_MODELS="true"` 对外只暴露这 4 条）：
+`custom_models.yaml` 示例（仓库自带这份，配合 `DISABLE_BUILTIN_MODELS="true"` 对外只暴露这 5 条）：
 
 ```yaml
 models:
@@ -52,9 +52,13 @@ models:
     model_header:
       x-goog-ext-525001261-jspb: '[1,null,null,null,"56fdd199312815e2",null,null,0,[4,5,6,8],null,null,2,null,null,1]'
 
-  - model_name: "gemini-3.1-pro" # 深度研究
+  - model_name: "gemini-3.1-pro" # 深度研究（旧名，上游已换成 4 Neon，同一条路由）
     model_header:
       x-goog-ext-525001261-jspb: '[1,null,null,null,"9d8ca3786ebdfbea",null,null,0,[4,5,6,8],null,null,1,null,null,3]'
+
+  - model_name: "gemini-4-neon" # 深度分析（接替 3.1 Pro，付费/Ultra 号）
+    model_header:
+      x-goog-ext-525001261-jspb: '[1,null,null,null,"e6fa609c3fa255c0",null,null,0,[4,5,6,8],null,null,2,null,null,3]'
 
   - model_name: "gemini-4-argon" # 代码与分析（上游名 4 Carbon）
     model_header:
@@ -65,6 +69,10 @@ models:
 > 服务端会把这条 header 解析成模型规格再重建真正的线上请求头，所以不用手抄 UUID、`["boq_..."]`、时间戳这类抓包残留，写了也会被忽略。
 > `x-goog-ext-73010989-jspb` / `x-goog-ext-73010990-jspb` 由服务端补齐；`x-goog-ext-525005358-jspb` 每次请求自动生成，都不用写进 YAML。
 > `CUSTOM_MODELS_FILE` 会在每次请求 / 读取模型列表时重新加载，改完文件不需要重启服务。
+
+> [!TIP]
+> 管理面板的「一键粘贴 Cookie」支持直接粘贴浏览器里复制的**整段 Cookie**：除 `__Secure-1PSID` / `__Secure-1PSIDTS` 外，`OSID`、`__Secure-OSID`、`SID`、`SAPISID`、`HSID` 等会存进 `GEMINI_EXTRA_COOKIES` 并随请求发给上游。Google 多账号会话缺这些 cookie 会被重定向到 accounts.google.com，表现为「Cookie 保存成功但请求一直挂」。
+> 若初始化探针（建会话 + 读回历史）对某些账号类型误报，可在 `.env` 设 `COOKIE_VALIDATE_ON_INIT=false` 跳过该校验（`init()` 本身仍会验证登录态）。
 
 1. 安装依赖
 
@@ -142,7 +150,7 @@ g.a000xxxxx,1PSIDTS的值,号4
 - **失败冷却**：生成失败按 15s → 30s → 60s → … → 300s 退避；初始化/校验失败说明这份 cookie 本身坏了，直接打到降级阈值并给足最长冷却。
 - **降级**：连续失败 3 次的号变成「兜底号」，只有别的号都不可用时才轮到它。
 - **重试**：非流式请求失败会自动换号重试（最多等于账号数）；流式请求会占住分配到的号直到流结束，中途不换号。
-- **观测**：管理面板 `/admin` 的服务状态里会列出每个号的在途数、成功/失败次数和剩余冷却（接口字段 `cookie_accounts`），日志里也会打印 `Cookie 池：账号 xxx 失败第 N 次，冷却 Ns`。
+- **观测**：管理面板 `/admin` 的服务状态里会列出每个号的在途数、成功/失败次数和剩余冷却（接口字段 `cookie_accounts`），日志里也会打印 `Cookie 池：账号 xxx 失败第 N 次，冷却 Ns`。账号池卡片还会显示该号套餐（FREE / PRO / ULTRA）和 5 小时 / 每周额度，点「刷新额度」可实时重新拉取（接口 `POST /admin/api/quota-refresh`）。
 
 > [!NOTE]
 > 多个号必须是不同的 Google 账号；同一个 `1PSID` 只保留第一次出现的那份配置（例如同时写在 `SECURE_1PSID` 和 `GEMINI_COOKIES` 里时以环境变量为准）。
@@ -155,7 +163,7 @@ g.a000xxxxx,1PSIDTS的值,号4
 | --- | --- | --- | --- | --- |
 | 快速解答 | `gemini-3.5-flash-lite` | 3.5 Flash-Lite | `cf41b0e0dd7d53e5` | 6 |
 | 日常帮助 | `gemini-4-hydrogen` | 4 Hydrogen | `56fdd199312815e2` | 1 |
-| 深度研究 | `gemini-3.1-pro` | 3.1 Pro | `9d8ca3786ebdfbea` | 3 |
+| 深度研究 | `gemini-4-neon`（旧名 `gemini-3.1-pro`） | 4 Neon（Deeper analysis，接替 3.1 Pro） | `e6fa609c3fa255c0` / `9d8ca3786ebdfbea` | 3 |
 | 代码与分析 | `gemini-4-argon` | 4 Carbon（原 Argon） | `95a4c0abcba24364` | 8 |
 
 思考档走 OpenAI 规范的 `reasoning_effort`，**不靠模型名后缀**，同一模型三档都可用：
@@ -168,7 +176,7 @@ g.a000xxxxx,1PSIDTS的值,号4
 
 - 也接受 `thinking_effort` / `think_effort` 两个别名，以及直接写线值 `1` / `4` / `2`。
 - 不传就用该模型默认档（1）。
-- 别名照旧：`gemini-4-carbon` / `gemini-4-pro` 都指 4 Argon 这条路由；不认识的模型名直接返回 400，不会偷偷换成别的模型。
+- 别名照旧：`gemini-4-carbon` / `gemini-4-pro` 都指 4 Argon 这条路由，`gemini-3.1-pro` / `neon` 都指 4 Neon 这条路由；不认识的模型名直接返回 400，不会偷偷换成别的模型。
 
 ```bash
 curl https://your-host/v1/chat/completions \
@@ -178,6 +186,9 @@ curl https://your-host/v1/chat/completions \
 
 > [!NOTE]
 > 4 Argon 走的是档位 8，服务端会自动补 `inner[49]=40` 等槽位，否则付费号上请求会挂到超时；代价是这一档拿不到 High 思考链。想要思考链用 `gemini-4-hydrogen` + `reasoning_effort: "high"`。
+
+> [!NOTE]
+> 4 Neon 走的是档位 3（`inner[79]=3`），接替原来 3.1 Pro 的位置，模型列表里显示为「Deeper analysis」。2026-11-19 在 Ultra 号上实测：普通档回报 `4 Neon`，`reasoning_effort: "high"` 回报 `4 Neon High` 并带 `reasoning_content`；免费号发档位 3 会挂到超时，所以这条路由要付费 / Ultra 账号的 cookie。`gemini-3.1-pro` 不再是下线模型，它和 `gemini-4-neon` 是同一条路由的两个名字。Neon 不是 Argon 的继任者：Argon 改名成了 Carbon，Neon 是另一个模型。
 
 ## 使用 Docker 运行（推荐）
 

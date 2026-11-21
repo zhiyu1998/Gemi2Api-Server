@@ -3,7 +3,7 @@
 gemini-webapi 只把模型 hex 写进 ``x-goog-ext-525001261-jspb``，4 系列还需要三样东西才能被服务端
 认下来（对齐 gemini-web2api-go 的抓包结论）：
 
-1. header 下标 14 的**档位**：4 Carbon/Argon 必须写 8，光有 hex 不生效；
+1. header 下标 14 的**档位**：4 Carbon/Argon 必须写 8，4 Neon 写 3，光有 hex 不生效；
 2. header 下标 15 / ``inner[80]`` 的**思考档**：1 普通、2 扩展(High)、4 中档；
 3. 档位 8 的请求要补 ``inner[49]=40`` 等槽位，否则付费号上会挂到超时。
 
@@ -158,7 +158,9 @@ def _apply_slots(inner: list, spec: ModelSpec) -> None:
 	只动模型选择相关的槽，提示词、附件、Gem、临时对话这些库已经填好的槽保持原样。
 	"""
 	think = spec.think_wire
-	needs_extra = spec.mode == 8 or think != THINK_NORMAL
+	# 档位 3（4 Neon）/ 8（4 Carbon）要写 inner[79]；思考档非普通要写 inner[80]。
+	# 库 2.0.0 只开 69 槽，这两个位置得先把数组拉长才写得进去。
+	needs_extra = spec.mode in (3, 8) or think != THINK_NORMAL
 	if needs_extra and len(inner) < _WIRE_MIN_SLOTS:
 		inner.extend([None] * (_WIRE_MIN_SLOTS - len(inner)))
 

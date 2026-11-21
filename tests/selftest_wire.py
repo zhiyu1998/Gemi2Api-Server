@@ -56,13 +56,19 @@ cases = {
 	"gemini-4-carbon@think=9": (gm.HEX_ARGON_4, 8, 1),
 	"gemini-3.5-flash-lite": (gm.HEX_FLASH_LITE_35, 6, 1),
 	"gemini-3.8-flash": (gm.HEX_FLASH_38, 1, 1),
+	"gemini-4-neon": (gm.HEX_NEON_4, 3, 1),
+	"neon": (gm.HEX_NEON_4, 3, 1),
+	"gemini-4-neon-thinking": (gm.HEX_NEON_4, 3, 2),
+	"gemini-4-neon-high": (gm.HEX_NEON_4, 3, 2),
+	"gemini-3.1-pro": (gm.HEX_PRO_31, 3, 1),
 }
 for raw, expected in cases.items():
 	spec = gm.resolve_builtin(gm.normalize_model_name(raw))
 	got = (spec.hex_id, spec.mode, spec.think_wire) if spec else None
 	check(raw, got == expected, f"-> {got}")
 
-check("3.1-pro 标记下线", bool(gm.resolve_builtin("gemini-3.1-pro").retired))
+check("3.1-pro 不再标记下线", gm.resolve_builtin("gemini-3.1-pro").retired == "")
+check("关键词兜底 neon->neon", gm.fuzzy_builtin("gpt-neon").name == "gemini-4-neon")
 check("关键词兜底 pro->carbon", gm.fuzzy_builtin("gpt-pro").name == "gemini-4-carbon")
 check("关键词兜底 flash->hydrogen", gm.fuzzy_builtin("gpt-4-flash").name == "gemini-4-hydrogen")
 check("未知名字不兜底", gm.fuzzy_builtin("totally-unknown") is None)
@@ -111,6 +117,21 @@ check("inner[96]=1", inner[96] == 1)
 check("inner[98]=1", inner[98] == 1)
 check("提示词保留", inner[0][0] == "hello")
 check("inner[59] 保留", inner[59] == "REQ-UUID")
+
+print("== f.req 改写：4 Neon（档位 3）==")
+spec = gm.resolve_builtin("gemini-4-neon")
+neon_header = json.loads(gm.build_header_string(spec.hex_id, spec.capacity, spec.mode, spec.think_wire, "SESSION-UUID"))
+check("Neon header index4=hex", neon_header[4] == gm.HEX_NEON_4)
+check("Neon header index14=mode 3", neon_header[14] == 3)
+out = gw._rewrite_freq(_fake_freq(), spec)
+inner = json.loads(json.loads(out)[1])
+check("补到 99 槽", len(inner) == 99, str(len(inner)))
+check("inner[79]=mode 3", inner[79] == 3)
+check("inner[80]=think 1", inner[80] == 1)
+check("inner[96]=0", inner[96] == 0)
+check("不补 inner[49]（档位 8 专属）", inner[49] is None)
+check("inner[68] 保留库值", inner[68] == 2)
+check("提示词保留", inner[0][0] == "hello")
 
 print("== f.req 改写：普通模型不动长度 ==")
 spec = gm.resolve_builtin("gemini-3.5-flash-lite")

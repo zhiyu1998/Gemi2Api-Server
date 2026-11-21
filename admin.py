@@ -18,6 +18,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
+from cookie_pool import load_extra_cookies, serialize_extra_cookies, split_cookie_bundle
+
 
 def _get_version() -> str:
     try:
@@ -215,6 +217,10 @@ async def get_status(token: str = Depends(verify_admin_token)):
 	# 多 Cookie 轮询池状态（没初始化就给空列表，不在这儿主动发请求）
 	pool = getattr(main, "gemini_pool", None)
 	pool_rows = pool.snapshot() if pool is not None else []
+	if pool_rows:
+		last_quota = getattr(main, "LAST_QUOTA", None)
+		for row in pool_rows:
+			row["quota"] = last_quota or row.get("quota")
 
 	# 计算平均响应时间
 	avg_response_time = 0
@@ -238,6 +244,7 @@ async def get_status(token: str = Depends(verify_admin_token)):
 		"cookie_valid": cookie_valid,
 		"cookie_count": len(pool_rows) or (1 if cookie_valid else 0),
 		"cookie_accounts": pool_rows,
+		"cookie_extra_names": sorted(load_extra_cookies().keys()),
 		"secure_1psid_masked": mask_cookie(SECURE_1PSID),
 		"secure_1psidts_masked": mask_cookie(SECURE_1PSIDTS),
 		"thinking_enabled": ENABLE_THINKING,
@@ -248,6 +255,23 @@ async def get_status(token: str = Depends(verify_admin_token)):
 		"version": _get_version(),
 		"start_time": datetime.fromtimestamp(_start_time).strftime("%Y-%m-%d %H:%M:%S"),
 	}
+
+
+@router.post("/api/quota-refresh")
+async def refresh_quota(token: str = Depends(verify_admin_token)):
+	"""重新拉取每个账号的额度/套餐，并返回最新账号池快照。"""
+	import main
+
+	pool = getattr(main, "gemini_pool", None)
+	if pool is None:
+		return {"success": False, "message": "账号池尚未初始化（先发一次请求）", "cookie_accounts": []}
+
+	view = await main.fetch_live_quota()
+	rows = pool.snapshot()
+	if view:
+		for row in rows:
+			row["quota"] = view
+	return {"success": bool(view), "cookie_accounts": rows, "message": "" if view else "额度获取失败（账号可能未登录或网络异常）"}
 
 
 @router.get("/api/logs")
@@ -372,35 +396,67 @@ async def restart_service(token: str = Depends(verify_admin_token)):
 		raise HTTPException(status_code=500, detail=f"重启失败: {str(e)}")
 
 
+def _drop_cookie_cache(psid: str) -> None:
+	"""删掉该账号留下的 cookie 缓存。
+
+	gemini-webapi 会把上一轮的 cookie 落到 secrets/.cached_cookies_*.json，且**缓存优先**
+	于调用方传入的 cookie；换号/换 1PSIDTS 后不清理的话，新 cookie 会一直撞在旧缓存上。
+	"""
+	import json
+
+	secret_dir = Path(__file__).parent / "secrets"
+	try:
+		for path in secret_dir.glob(".cached_cookies_*.json"):
+			try:
+				data = json.loads(path.read_text(encoding="utf-8"))
+			except Exception:
+				continue
+			items = data if isinstance(data, list) else (data.get("cookies") if isinstance(data, dict) else None) or []
+			for item in items:
+				if isinstance(item, dict) and item.get("name") == "__Secure-1PSID" and item.get("value") == psid:
+					path.unlink(missing_ok=True)
+					break
+	except Exception:
+		pass
+	try:
+		(secret_dir / f".cached_1psidts_{psid}.txt").unlink(missing_ok=True)
+	except Exception:
+		pass
+
+
 class CookieUpdate(BaseModel):
 	"""Cookie 更新请求"""
 
 	secure_1psid: str
 	secure_1psidts: str
+	cookie_raw: str = ""
 
 
 @router.post("/api/cookies")
 async def update_cookies(cookies: CookieUpdate, token: str = Depends(verify_admin_token)):
 	"""更新 Gemini Cookie"""
-	if not cookies.secure_1psid or not cookies.secure_1psidts:
-		raise HTTPException(status_code=400, detail="Cookie 值不能为空")
+	psid, psidts, extras = split_cookie_bundle(cookies.cookie_raw, cookies.secure_1psid, cookies.secure_1psidts)
+	if not psid or not psidts:
+		raise HTTPException(status_code=400, detail="Cookie 值不能为空：需要 __Secure-1PSID 和 __Secure-1PSIDTS")
 
 	# 保存到 .env 文件
-	write_env(
-		{
-			"SECURE_1PSID": cookies.secure_1psid,
-			"SECURE_1PSIDTS": cookies.secure_1psidts,
-		}
-	)
+	updates = {
+		"SECURE_1PSID": psid,
+		"SECURE_1PSIDTS": psidts,
+		"GEMINI_EXTRA_COOKIES": serialize_extra_cookies(extras),
+	}
+	write_env(updates)
+	for _key, _val in updates.items():
+		os.environ[_key] = _val
+	_drop_cookie_cache(psid)
 
 	# 更新运行时变量
 	import main
 
-	main.SECURE_1PSID = cookies.secure_1psid
-	main.SECURE_1PSIDTS = cookies.secure_1psidts
+	main.SECURE_1PSID = psid
+	main.SECURE_1PSIDTS = psidts
 	# 同步进进程环境：池子/图片代理都有读 os.environ 的路径，只改模块变量会拿到旧值
-	os.environ["SECURE_1PSID"] = cookies.secure_1psid
-	os.environ["SECURE_1PSIDTS"] = cookies.secure_1psidts
+
 
 	# 池子里的旧客户端作废：下次请求按新 Cookie 重建
 	await main.reset_gemini_pool()
@@ -411,25 +467,28 @@ async def update_cookies(cookies: CookieUpdate, token: str = Depends(verify_admi
 @router.post("/api/cookies-save-reinit")
 async def save_cookies_and_reinit(cookies: CookieUpdate, token: str = Depends(verify_admin_token)):
 	"""保存 Cookie 并重新连接 Gemini（一步完成）"""
-	if not cookies.secure_1psid or not cookies.secure_1psidts:
-		raise HTTPException(status_code=400, detail="Cookie 值不能为空")
+	psid, psidts, extras = split_cookie_bundle(cookies.cookie_raw, cookies.secure_1psid, cookies.secure_1psidts)
+	if not psid or not psidts:
+		raise HTTPException(status_code=400, detail="Cookie 值不能为空：需要 __Secure-1PSID 和 __Secure-1PSIDTS")
 
 	# 保存到 .env 文件
-	write_env(
-		{
-			"SECURE_1PSID": cookies.secure_1psid,
-			"SECURE_1PSIDTS": cookies.secure_1psidts,
-		}
-	)
+	updates = {
+		"SECURE_1PSID": psid,
+		"SECURE_1PSIDTS": psidts,
+		"GEMINI_EXTRA_COOKIES": serialize_extra_cookies(extras),
+	}
+	write_env(updates)
+	for _key, _val in updates.items():
+		os.environ[_key] = _val
+	_drop_cookie_cache(psid)
 
 	# 更新运行时变量
 	import main
 
-	main.SECURE_1PSID = cookies.secure_1psid
-	main.SECURE_1PSIDTS = cookies.secure_1psidts
+	main.SECURE_1PSID = psid
+	main.SECURE_1PSIDTS = psidts
 	# 同上：环境变量也要跟着改，否则重置后的池子还会读到旧 Cookie
-	os.environ["SECURE_1PSID"] = cookies.secure_1psid
-	os.environ["SECURE_1PSIDTS"] = cookies.secure_1psidts
+
 
 	# 重新初始化：关掉池里全部客户端，再按新配置重建
 	await main.reset_gemini_pool()

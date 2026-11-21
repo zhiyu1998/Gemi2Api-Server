@@ -9,7 +9,7 @@ This is a FastAPI-based server that provides OpenAI-compatible API endpoints for
 ### Core Components
 
 - **main.py**: Single-file application containing all API endpoints, authentication, and request handling
-- **gemini_models.py**: Built-in model catalog (Gemini 4 Hydrogen/Carbon + 3.x) with name/alias/tier resolution and model-header builders. `ModelSpec` carries hex id, mode (header index 14 / `inner[79]`), think wire (1 normal / 2 extended / 4 medium) and capacity.
+- **gemini_models.py**: Built-in model catalog (Gemini 4 Hydrogen/Neon/Carbon + 3.x) with name/alias/tier resolution and model-header builders. `ModelSpec` carries hex id, mode (header index 14 / `inner[79]`), think wire (1 normal / 2 extended / 4 medium) and capacity.
 - **gemini_wire.py**: HTTP-layer request shim. It patches the underlying session's `stream()` so every StreamGenerate request gets a canonical `x-goog-ext-525001261-jspb` header and rewritten `f.req` slots (`inner[79]`=mode, `inner[80]`=think, plus the mode-8 slots `inner[49]=40`, `inner[68]=2`, `inner[83]/[91]/[96]/[98]=1`). Model choice travels through a `ContextVar`, so it is per-request and safe under concurrency. This keeps behaviour identical across gemini-webapi 2.0 (69-slot inner, header verbatim) and 2.1 (81-slot inner, mirrors header model number).
 - **Authentication**: Uses Gemini cookies (`SECURE_1PSID`, `SECURE_1PSIDTS`) for Gemini API access and optional `API_KEY` for server authentication
 - **API Endpoints**:
@@ -19,7 +19,8 @@ This is a FastAPI-based server that provides OpenAI-compatible API endpoints for
 
 ### Gemini 4 notes
 
-- Model selection is hex + mode + think wire, not the deprecated `Model` enum. `gemini-4-hydrogen` shares `56fdd199312815e2` with `gemini-3.8-flash`; `gemini-4-carbon` / `gemini-4-argon` is `95a4c0abcba24364` with mode 8.
+- Model selection is hex + mode + think wire, not the deprecated `Model` enum. `gemini-4-hydrogen` shares `56fdd199312815e2` with `gemini-3.8-flash`; `gemini-4-carbon` / `gemini-4-argon` is `95a4c0abcba24364` with mode 8; `gemini-4-neon` is `e6fa609c3fa255c0` with mode 3.
+- 4 Neon (upstream name "Deeper analysis") took over the slot 3.1 Pro used to occupy, so `gemini-3.1-pro` is an old name for that same mode-3 route rather than a retired model. Paid/Ultra accounts only: free accounts hang on mode 3. Normal tier answers as `4 Neon`, `high` answers as `4 Neon High` with a reasoning chain.
 - Thinking tier is a **request field**, not a model name: `reasoning_effort` (`low`=1, `medium`=4, `high`=2; `thinking_effort` / `think_effort` accepted as aliases). Do not add `-thinking` suffixes back to the catalog.
 - Mode 8 needs `inner[49]=40` or paid accounts hang; that slot also disables the High thinking tier, which is why `high` on Argon answers at the normal tier.
 - `custom_models.yaml` headers are parsed back into a spec (`parse_header_spec`), so legacy hand-written long headers keep working after the library stopped passing them through verbatim.
@@ -107,7 +108,7 @@ docker-compose down
 
 ## Model Mapping
 
-`resolve_model_spec()` in `main.py` turns a requested model name into a `ModelSpec`: custom models (`CUSTOM_MODELS_FILE`) win, then the built-in catalog in `gemini_models.py`, then a keyword fallback (flash/hydrogen → 4 Hydrogen, pro/carbon → 4 Carbon). Unknown names return 400 instead of silently falling back to another model. Thinking tier comes from `reasoning_effort`, not from the model name.
+`resolve_model_spec()` in `main.py` turns a requested model name into a `ModelSpec`: custom models (`CUSTOM_MODELS_FILE`) win, then the built-in catalog in `gemini_models.py`, then a keyword fallback (flash/hydrogen → 4 Hydrogen, neon → 4 Neon, pro/carbon → 4 Carbon). Unknown names return 400 instead of silently falling back to another model. Thinking tier comes from `reasoning_effort`, not from the model name.
 
 ## Request Flow
 

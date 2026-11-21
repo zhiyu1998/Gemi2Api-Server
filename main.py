@@ -39,6 +39,7 @@ from cookie_pool import (
 	CookiePool,
 	CookiePoolUnavailable,
 	load_cookie_entries,
+	load_extra_cookies,
 )
 from gemini_models import (
 	BUILTIN_MODELS,
@@ -111,6 +112,11 @@ async def _init_gemini_client_background():
 			len(pool),
 			", ".join(pool.labels),
 		)
+		# 顺手拉一次账号额度/套餐，管理面板一打开就有数据（失败不影响服务）
+		try:
+			await fetch_live_quota()
+		except Exception:
+			pass
 	except Exception as e:
 		logger.warning(f"Gemini client init failed (service running without API access): {e}")
 
@@ -737,7 +743,7 @@ async def list_models():
 def resolve_model_spec(requested_model: str) -> Optional[ModelSpec]:
 	"""把请求里的模型名解析成模型规格（自定义模型优先，其次内置目录）。
 
-	认不出确切名字时按关键词兜底（flash/hydrogen → 4 Hydrogen，pro/carbon → 4 Carbon），
+	认不出确切名字时按关键词兜底（flash/hydrogen → 4 Hydrogen，neon → 4 Neon，pro/carbon → 4 Carbon），
 	保证老客户端写的 ``gemini-3.0-flash`` 这类名字也不会整条链路 500。
 	"""
 	name = normalize_model_name(requested_model)
@@ -937,6 +943,7 @@ async def get_gemini_pool() -> CookiePool:
 			install_shim=install_wire_shim,
 			validator=validate_gemini_client_session if COOKIE_VALIDATE_ON_INIT else None,
 			psidts_cache=load_cached_1psidts,
+			extra_cookies=load_extra_cookies(),
 			max_concurrency=COOKIE_MAX_CONCURRENCY,
 			cooldown_base=COOKIE_COOLDOWN_BASE,
 			cooldown_max=COOKIE_COOLDOWN_MAX,
@@ -988,6 +995,67 @@ async def generate_with_cookie_pool(pool: CookiePool, conversation: str, gen_kwa
 	if last_error is not None:
 		raise last_error
 	raise RuntimeError("cookie pool exhausted without response")
+
+
+LAST_QUOTA: Optional[Dict[str, Any]] = None
+
+
+async def fetch_account_email(client) -> str:
+	"""从 Gemini 网页引导页里抠出登录账号邮箱（拿不到就返回空串）。"""
+	try:
+		response = await client.client.get("https://gemini.google.com/app")
+		text = (getattr(response, "text", "") or "")
+	except Exception:
+		return ""
+
+	for candidate in re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text):
+		lowered = candidate.lower()
+		if lowered.endswith("@google.com"):
+			continue
+		return candidate
+	return ""
+
+
+async def fetch_live_quota() -> Optional[Dict[str, Any]]:
+	"""用临时客户端拉一次账号额度/套餐（池里的客户端状态可能不干净，单独建一个最稳）。"""
+	global LAST_QUOTA
+
+	if not SECURE_1PSID or not SECURE_1PSIDTS:
+		return None
+
+	from cookie_pool import load_extra_cookies, mask_email, quota_view
+
+	client = GeminiClient(SECURE_1PSID, SECURE_1PSIDTS)
+	try:
+		extras = load_extra_cookies()
+		if extras:
+			client.cookies = extras
+		await client.init(timeout=30, auto_close=False, auto_refresh=False)
+		for method_name in ("_fetch_quota", "_fetch_usage_info"):
+			method = getattr(client, method_name, None)
+			if method is None:
+				continue
+			try:
+				await method()
+			except Exception:
+				pass
+		view = quota_view(client) or {}
+		email = await fetch_account_email(client)
+		if email:
+			view["email"] = email
+			view["email_masked"] = mask_email(email)
+		if view:
+			LAST_QUOTA = view
+			return view
+		return None
+	except Exception as e:
+		logger.warning("拉取账号额度失败：%s", e)
+		return None
+	finally:
+		try:
+			await client.close()
+		except Exception:
+			pass
 
 
 async def reset_gemini_pool() -> None:
@@ -1087,7 +1155,7 @@ async def create_chat_completion(
 		if model_spec is None:
 			raise HTTPException(
 				status_code=400,
-				detail=f"Unknown model: {request.model}. Try gemini-4-hydrogen, gemini-4-carbon or gemini-3.5-flash-lite.",
+				detail=f"Unknown model: {request.model}. Try gemini-4-hydrogen, gemini-4-neon, gemini-4-carbon or gemini-3.5-flash-lite.",
 			)
 		if model_spec.retired:
 			raise HTTPException(status_code=400, detail=model_spec.retired)

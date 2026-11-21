@@ -948,6 +948,29 @@
             gap: 12px;
             margin-bottom: 10px;
         }
+        .cookie-pool-quota {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 6px;
+        }
+        .cookie-pool-quota-chip {
+            padding: 1px 7px;
+            border-radius: 999px;
+            background: rgba(104, 120, 141, .12);
+            color: var(--text-secondary);
+            font-size: 10px;
+            white-space: nowrap;
+        }
+        .cookie-pool-quota-tier {
+            padding: 1px 8px;
+            border-radius: 999px;
+            background: rgba(79, 195, 247, .14);
+            color: var(--accent, #4fc3f7);
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: .3px;
+        }
         .cookie-pool-title {
             color: var(--text);
             font-size: 12px;
@@ -989,6 +1012,13 @@
             color: var(--text);
             font-size: 12px;
             font-weight: 550;
+            overflow-wrap: anywhere;
+        }
+        .cookie-pool-email {
+            margin-top: 2px;
+            color: var(--text-secondary);
+            font-family: "SFMono-Regular", Consolas, monospace;
+            font-size: 11px;
             overflow-wrap: anywhere;
         }
         .cookie-pool-psid {
@@ -1224,6 +1254,7 @@
                     <div class="cookie-pool-heading">
                         <span class="cookie-pool-title" id="cookiePoolTitle">账号池</span>
                         <span class="cookie-pool-count" id="cookiePoolCount">--</span>
+                        <button class="btn btn-ghost" onclick="refreshQuota()" title="重新拉取账号额度/套餐">刷新额度</button>
                     </div>
                     <div class="cookie-pool-list" id="cookiePoolList">
                         <div class="cookie-pool-empty">--</div>
@@ -1595,9 +1626,39 @@
 
                 const row = createElement('div', 'cookie-pool-row');
                 const main = createElement('div', 'cookie-pool-main');
-                const label = account.label || account.psid_masked || `账号 ${index + 1}`;
+                const quota = account.quota;
+                const emailMasked = quota && quota.email_masked ? String(quota.email_masked) : '';
+                const baseLabel = account.label || account.psid_masked || `账号 ${index + 1}`;
+                const label = (baseLabel === 'environment' && emailMasked) ? emailMasked : baseLabel;
                 main.appendChild(createElement('div', 'cookie-pool-label', label));
+                if (emailMasked && label !== emailMasked) {
+                    main.appendChild(createElement('div', 'cookie-pool-email', emailMasked));
+                }
                 main.appendChild(createElement('div', 'cookie-pool-psid', account.psid_masked || '--'));
+
+                if (quota) {
+                    const quotaBox = createElement('div', 'cookie-pool-quota');
+                    if (quota.tier) quotaBox.appendChild(createElement('span', 'cookie-pool-quota-tier', String(quota.tier)));
+                    (Array.isArray(quota.windows) ? quota.windows : []).forEach((windowInfo) => {
+                        const pct = Number(windowInfo && windowInfo.usage_percentage);
+                        const label = (windowInfo && windowInfo.window) ? String(windowInfo.window) : '额度';
+                        const text = Number.isFinite(pct) ? `${label} 剩 ${Math.max(0, Math.round(100 - pct))}%` : `${label} --`;
+                        quotaBox.appendChild(createElement('span', 'cookie-pool-quota-chip', text));
+                    });
+                    (Array.isArray(quota.buckets) ? quota.buckets : []).forEach((bucket) => {
+                        const remaining = bucket && bucket.remaining;
+                        const total = bucket && bucket.total;
+                        const name = (bucket && bucket.label) ? String(bucket.label) : '额度';
+                        const text = (remaining !== null && remaining !== undefined && total !== null && total !== undefined)
+                            ? `${name} ${remaining}/${total}`
+                            : name;
+                        quotaBox.appendChild(createElement('span', 'cookie-pool-quota-chip', text));
+                    });
+                    if (quota.ai_credits_remaining !== null && quota.ai_credits_remaining !== undefined) {
+                        quotaBox.appendChild(createElement('span', 'cookie-pool-quota-chip', `AI credits ${quota.ai_credits_remaining}`));
+                    }
+                    main.appendChild(quotaBox);
+                }
 
                 const side = createElement('div', 'cookie-pool-side');
                 const statusGroup = createElement('div', 'cookie-pool-status-group');
@@ -1630,6 +1691,22 @@
                 row.appendChild(side);
                 list.appendChild(row);
             });
+        }
+
+        // 重新拉取账号额度/套餐
+        async function refreshQuota() {
+            try {
+                const res = await authFetch(`${API_BASE}/quota-refresh`, { method: 'POST' });
+                const data = await res.json();
+                if (res.ok && data.success) {
+                    renderCookieAccounts({ cookie_accounts: data.cookie_accounts || [], cookie_count: (data.cookie_accounts || []).length });
+                } else {
+                    alert(data.message || '刷新额度失败');
+                }
+            } catch (e) {
+                console.error('刷新额度失败:', e);
+                alert('刷新额度失败: ' + e.message);
+            }
         }
 
         // 获取服务状态
@@ -1803,7 +1880,8 @@
             const psidts = document.getElementById('cookie1psidts').value.trim();
             const msgEl = document.getElementById('cookieMessage');
             
-            if (!psid || !psidts) {
+            const rawBundle = (document.getElementById('cookieRaw')?.value || '').trim();
+            if ((!psid || !psidts) && !rawBundle) {
                 msgEl.style.display = 'block';
                 msgEl.style.background = '#3a1a1a';
                 msgEl.style.color = '#f44336';
@@ -1820,7 +1898,7 @@
                 const res = await authFetch(`${API_BASE}/cookies-save-reinit`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ secure_1psid: psid, secure_1psidts: psidts })
+                    body: JSON.stringify({ secure_1psid: psid, secure_1psidts: psidts, cookie_raw: (document.getElementById('cookieRaw')?.value || '').trim() })
                 });
                 
                 const data = await res.json();

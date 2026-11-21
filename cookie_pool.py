@@ -40,6 +40,111 @@ logger = logging.getLogger(__name__)
 
 _PSID_SAFE = re.compile(r"^[\w\-.]+$")
 _DELIMITERS = re.compile(r"[,;\t|]")
+_COOKIE_PAIR = re.compile(r"([^=;\s]+)=([^;]*)")
+_PSID_KEYS = ("__Secure-1PSID", "__Secure-3PSID")
+_PSIDTS_KEYS = ("__Secure-1PSIDTS", "__Secure-3PSIDTS")
+
+
+def split_cookie_bundle(*values: str) -> tuple:
+	"""把「浏览器里复制的一整段 Cookie」或分开的 1PSID/1PSIDTS 归一成 (psid, psidts, extras)。
+
+	Google 多账号会话除了 1PSID/1PSIDTS，还要 OSID / __Secure-OSID / SID / SAPISID 这些
+	cookie 才能选中正确的登录态；只发前两个会被重定向到 accounts.google.com 登录页，
+	表现为「Cookie 保存成功但请求一直挂」。这里把整段都收下来，额外的放进 extras。
+	"""
+	psid = psidts = ""
+	extras: dict = {}
+	for raw in values:
+		text = (raw or "").strip()
+		if not text:
+			continue
+		if "=" in text:
+			for name, value in _COOKIE_PAIR.findall(text):
+				name, value = name.strip(), value.strip()
+				if name in _PSID_KEYS:
+					psid = psid or value
+				elif name in _PSIDTS_KEYS:
+					psidts = psidts or value
+				elif name:
+					extras[name] = value
+		elif not psid:
+			psid = text
+		elif not psidts:
+			psidts = text
+	return psid, psidts, extras
+
+
+def serialize_extra_cookies(extras: dict) -> str:
+	"""把额外 cookie 拼回 ``k=v; k=v`` 存进 .env。"""
+	return "; ".join(f"{k}={v}" for k, v in extras.items() if k and v)
+
+
+def load_extra_cookies() -> dict:
+	"""从 ``GEMINI_EXTRA_COOKIES`` 读额外 cookie（整段 Cookie 里除 1PSID/1PSIDTS 之外的部分）。"""
+	raw = (os.environ.get("GEMINI_EXTRA_COOKIES") or "").strip()
+	if not raw:
+		return {}
+	extras = {}
+	for name, value in _COOKIE_PAIR.findall(raw):
+		name, value = name.strip(), value.strip()
+		if name and name not in _PSID_KEYS and name not in _PSIDTS_KEYS:
+			extras[name] = value
+	return extras
+
+
+def quota_view(client: Any) -> Optional[Dict[str, Any]]:
+	"""把 gemini-webapi 客户端的额度/套餐信息压成管理面板能直接渲染的结构。
+
+	``usage_info`` 是新的算力用量口径：tier(FREE/PRO/ULTRA) + 5 小时/每周窗口 +
+	AI credits；``quotas`` 是老口径的按模型桶（x/y credits）。两者都收，前端择优显示。
+	"""
+	if client is None:
+		return None
+
+	info = getattr(client, "usage_info", None)
+	info = info if isinstance(info, dict) else {}
+	tier = info.get("tier") if isinstance(info.get("tier"), dict) else {}
+
+	view: Dict[str, Any] = {
+		"tier": tier.get("label"),
+		"subscription": info.get("use_overage_ai_credits"),
+		"ai_credits_remaining": info.get("ai_credits_remaining"),
+		"windows": [],
+		"buckets": [],
+	}
+
+	for key in ("current_5h", "weekly"):
+		window = info.get(key)
+		if isinstance(window, dict):
+			view["windows"].append(
+				{
+					"window": window.get("window") or key,
+					"remaining": window.get("remaining_credits"),
+					"usage_percentage": window.get("usage_percentage"),
+					"reset_at": window.get("reset_at"),
+				}
+			)
+
+	quotas = getattr(client, "quotas", None)
+	quotas = quotas if isinstance(quotas, dict) else {}
+	for quota_id, item in quotas.items():
+		if quota_id == "usage_info" or not isinstance(item, dict):
+			continue
+		if item.get("remaining") is None and item.get("total") is None:
+			continue
+		view["buckets"].append(
+			{
+				"label": item.get("label") or quota_id,
+				"remaining": item.get("remaining"),
+				"total": item.get("total"),
+				"usage_percentage": item.get("usage_percentage"),
+				"window": item.get("window"),
+			}
+		)
+
+	if not view["tier"] and not view["windows"] and not view["buckets"]:
+		return None
+	return view
 
 # 命中这些字样就认为会话本身失效了，得丢掉客户端重建（而不是只冷却一下）
 AUTH_FAILURE_HINTS = (
@@ -68,6 +173,18 @@ def mask_secret(value: str, keep: int = 4) -> str:
 	if len(value) <= keep * 2:
 		return "***"
 	return f"{value[:keep]}***{value[-keep:]}"
+
+
+def mask_email(value: str) -> str:
+	"""邮箱脱敏：保留首字符与域名，例如 h***@gmail.com。"""
+	email = (value or "").strip()
+	if "@" not in email:
+		return ""
+	local, _, domain = email.partition("@")
+	if not local or not domain:
+		return ""
+	head = local[0]
+	return f"{head}***@{domain}"
 
 
 @dataclass(frozen=True)
@@ -288,6 +405,7 @@ class CookiePool:
 		install_shim: Optional[Callable[[GeminiClient], Any]] = None,
 		validator: Optional[Callable[[GeminiClient, str], Any]] = None,
 		psidts_cache: Optional[Callable[[str], str]] = None,
+		extra_cookies: Optional[Dict[str, str]] = None,
 		max_concurrency: int = 0,
 		cooldown_base: float = 15.0,
 		cooldown_max: float = 300.0,
@@ -298,6 +416,7 @@ class CookiePool:
 		self.install_shim = install_shim
 		self.validator = validator
 		self.psidts_cache = psidts_cache
+		self.extra_cookies = {k: v for k, v in (extra_cookies or {}).items() if k and v}
 		self.max_concurrency = max(0, int(max_concurrency))
 		self.cooldown_base = max(1.0, float(cooldown_base))
 		self.cooldown_max = max(self.cooldown_base, float(cooldown_max))
@@ -401,6 +520,9 @@ class CookiePool:
 				try:
 					logger.info("初始化账号 %s（%s 1PSIDTS）", slot.entry.name, source)
 					client = GeminiClient(slot.entry.psid, psidts)
+					if self.extra_cookies:
+						# 整段 Cookie 里的 OSID / __Secure-OSID / SID 等：多账号会话靠它们选中登录态
+						client.cookies = self.extra_cookies
 					await client.init(timeout=self.init_timeout)
 					if self.install_shim is not None:
 						self.install_shim(client)
@@ -488,6 +610,7 @@ class CookiePool:
 					"failures": slot.failures,
 					"cooling_down_seconds": round(max(0.0, slot.cooldown_until - now), 1),
 					"last_error": slot.last_error,
+					"quota": quota_view(slot.client),
 				}
 			)
 		return rows

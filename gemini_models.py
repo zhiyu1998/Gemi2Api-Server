@@ -4,12 +4,13 @@ gemini-webapi 的 ``Model`` 枚举是历史遗留：里面写死的 hex 一旦 G
 而且根本没有 4 系列。这里改成一张显式的模型表：
 
 * ``hex_id``   —— ``x-goog-ext-525001261-jspb`` 里第 4 位的模型开关，服务端只认它；
-* ``mode``     —— 请求头下标 14 / ``inner[79]`` 的档位，8 才是真正选 4 Carbon/Argon；
+* ``mode``     —— 请求头下标 14 / ``inner[79]`` 的档位，8 才真正选 4 Carbon/Argon，3 选 4 Neon；
 * ``think``    —— 请求头下标 15 / ``inner[80]`` 的思考档：1 普通、2 扩展(High)、4 中档；
 * ``capacity`` —— 请求头下标 11 的账号档位尾值。
 
 命名对齐 gemini-web2api-go：4 Hydrogen 与 3.8 Flash 同一个 hex（上游原地升级），
-4 Argon 被上游改名成 4 Carbon，两条名字都认。
+4 Argon 被上游改名成 4 Carbon，两条名字都认；4 Neon 接替 3.1 Pro 的位置（同档位 3），
+``gemini-3.1-pro`` 是它的旧名字。
 """
 
 from __future__ import annotations
@@ -26,10 +27,15 @@ from gemini_webapi.constants import MODEL_HEADER_KEY
 # ---------------------------------------------------------------------------
 HEX_FLASH_36 = "fbb127bbb056c959"  # 3.6 Flash
 HEX_FLASH_LITE_35 = "cf41b0e0dd7d53e5"  # 3.5 Flash-Lite
-HEX_PRO_31 = "9d8ca3786ebdfbea"  # 3.1 Pro（已下线）
+HEX_PRO_31 = "9d8ca3786ebdfbea"  # 3.1 Pro 的旧位置，现由 4 Neon 接替（同档位 3）
 HEX_FLASH_38 = "56fdd199312815e2"  # 3.8 Flash，原地升级后显示为 4 Hydrogen
 HEX_HYDROGEN_4 = HEX_FLASH_38
 HEX_ARGON_4 = "95a4c0abcba24364"  # 4 Argon → 上游改名为 4 Carbon
+# 4 Neon：otAQ7b 清单里的主 hex，短名 Neon、代号 Neon4p0、网页描述「Deeper analysis」。
+# 真正选中它的是**档位 3**（不是 hex）：2026-11-19 Ultra 号实测 mode 3 回报 "4 Neon"，
+# 高思考档回报 "4 Neon High" 并带思考链；免费号发 mode 3 会挂到超时。
+# 3.1 Pro 的位置就是被它接替的，所以 HEX_PRO_31 和它落到同一条路由（同 mode 3）。
+HEX_NEON_4 = "e6fa609c3fa255c0"
 
 # ---------------------------------------------------------------------------
 # 思考档线值（请求头下标 15 / inner[80]）
@@ -79,10 +85,9 @@ def think_from_effort(*values) -> int:
 			return EFFORT_TO_THINK[key]
 	return 0
 
-_RETIRED_PRO_31 = (
-	"gemini-3.1-pro 已下线：登录免费号会挂到超时，付费号被降级成 3.5 Flash-Lite。"
-	"请改用 gemini-4-hydrogen（登录号都可用）或 gemini-4-carbon（付费/Ultra）"
-)
+
+# 3.1 Pro 的位置 2026-11-19 起换成了 4 Neon（同档位 3），旧名字不再算下线，
+# 否则老配置请求 3.1 Pro 会被 400 拦掉，等于把 Neon 一起拦在门外。
 
 
 @dataclass(frozen=True)
@@ -159,6 +164,16 @@ BUILTIN_MODELS: Dict[str, ModelSpec] = {
 		),
 		needs_login=True,
 	),
+	"gemini-4-neon": ModelSpec(
+		name="gemini-4-neon",
+		hex_id=HEX_NEON_4,
+		mode=3,
+		capacity=2,
+		display="4 Neon",
+		description="4 Neon（Deeper analysis）：接替 3.1 Pro 的位置，付费/Ultra 号专属，免费号会挂到超时",
+		aliases=("neon", "4-neon", "gemini-4-deep"),
+		needs_login=True,
+	),
 	# --- 3.x 保留（老配置还在用） -------------------------------------------
 	"gemini-3.8-flash": ModelSpec(
 		name="gemini-3.8-flash",
@@ -194,10 +209,9 @@ BUILTIN_MODELS: Dict[str, ModelSpec] = {
 		mode=3,
 		capacity=1,
 		display="3.1 Pro",
-		description="3.1 Pro：上游已下线",
+		description="3.1 Pro 的旧名称：上游已把这一档换成 4 Neon，跟 gemini-4-neon 同一条路由",
 		aliases=("3.1-pro",),
 		needs_login=True,
-		retired=_RETIRED_PRO_31,
 	),
 }
 
@@ -211,6 +225,7 @@ for _key, _spec in BUILTIN_MODELS.items():
 #: 关键词兜底：客户端乱传模型名时按关键词挑一个，避免整条链路 500
 _KEYWORD_ROUTES: tuple = (
 	(("hydrogen", "flash", "fast"), "gemini-4-hydrogen"),
+	(("neon", "deeper"), "gemini-4-neon"),
 	(("carbon", "argon", "pro", "ultra", "reason"), "gemini-4-carbon"),
 	(("lite", "light", "mini"), "gemini-3.5-flash-lite"),
 )
