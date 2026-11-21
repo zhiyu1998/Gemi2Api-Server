@@ -32,7 +32,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from gemini_webapi import GeminiClient, set_log_level
 from gemini_webapi.constants import MODEL_HEADER_KEY
 from PIL import Image
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from cookie_pool import (
 	CookieLease,
@@ -712,6 +712,8 @@ def correct_markdown(md_text: str) -> str:
 
 # Pydantic models for API requests and responses
 class ContentItem(BaseModel):
+	model_config = ConfigDict(extra="allow")
+
 	type: str
 	text: Optional[str] = None
 	image_url: Optional[Dict[str, str]] = None
@@ -721,6 +723,8 @@ class ContentItem(BaseModel):
 
 
 class Message(BaseModel):
+	model_config = ConfigDict(extra="allow")
+
 	role: str
 	content: Union[str, List[ContentItem], None] = None
 	name: Optional[str] = None
@@ -730,6 +734,8 @@ class Message(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
+	model_config = ConfigDict(extra="allow")
+
 	model: str
 	messages: List[Message]
 	temperature: Optional[float] = 0.7
@@ -978,6 +984,10 @@ def prepare_conversation(
 		# 启用 Gem 时跳过 system 消息（Gem 本身就是 system prompt 通道）
 		if skip_system and msg.role == "system":
 			continue
+		if isinstance(msg.content, list):
+			logger.info("Message content types: %s", [(item.type, sorted((item.model_extra or {}).keys())) for item in msg.content])
+		if getattr(msg, "model_extra", None):
+			logger.info("Message extra keys: %s", {key: type(value).__name__ for key, value in msg.model_extra.items()})
 
 		# tool 角色：工具执行结果回放，给模型一个清爽的成功/失败信号
 		if msg.role == "tool":
@@ -1039,12 +1049,19 @@ def _message_content_to_text(content: Union[str, List[ContentItem], None], temp_
 			text_bits.append(item.text or "")
 		elif item.type == "image_url" and item.image_url:
 			image_url = item.image_url.get("url", "")
-			if image_url.startswith("data:image/"):
+			if image_url.startswith("data:") and "," in image_url:
 				try:
-					image_data = base64.b64decode(image_url.split(",")[1])
-					with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+					header, payload = image_url.split(",", 1)
+					mime = header.split(";")[0].split("/")[-1] if "/" in header else "png"
+					import mimetypes
+
+					suffix = mimetypes.guess_extension(mime) or ".bin"
+					image_data = base64.b64decode(payload)
+					with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
 						tmp.write(image_data)
 						images.append(tmp.name)
+					if not header.startswith("data:image/"):
+						text_bits.append(f"[附件：{item.image_url.get('filename') or 'attachment'}]")
 				except Exception as e:
 					logger.error(f"Error processing base64 image: {str(e)}")
 		elif item.type in ("file", "input_file", "document"):
@@ -1331,6 +1348,8 @@ async def create_chat_completion(
 			len(temp_files),
 			len(request.tools or []) if tools_active else 0,
 		)
+		if getattr(request, "model_extra", None):
+			logger.info("Request extra keys: %s", {key: type(value).__name__ for key, value in request.model_extra.items()})
 
 		# 解析模型（自定义模型优先，其次内置目录；Gemini 4 系列在这里落到 hex/档位/思考档）
 		model_spec = resolve_model_spec(request.model)
@@ -1414,6 +1433,45 @@ async def create_chat_completion(
 
 					# Send initial role chunk
 					yield make_chunk({"role": "assistant"})
+
+					# Task 模型内部强制走非流式：上游 Task 流的进度帧会长时间没有正文，
+					# 很多客户端等到 think 后就断开；这里用后台任务 + 心跳，最后一次性发结果和文件。
+					if model_spec.feature:
+						task = asyncio.create_task(gemini_client.generate_content(conversation, **gen_kwargs))
+						while not task.done():
+							done, _ = await asyncio.wait({task}, timeout=15)
+							if not done:
+								yield ": keepalive\n\n"
+						try:
+							task_response = task.result()
+						except Exception as e:
+							logger.error("Task generation failed: %s", e)
+							yield make_chunk({"content": "\n\n[Task 生成失败，请稍后重试]"})
+							yield make_chunk({}, finish_reason="stop")
+							yield "data: [DONE]\n\n"
+							return
+
+						task_text = getattr(task_response, "text", "") or ""
+						task_thoughts = getattr(task_response, "thoughts", "") or ""
+						task_cid = task_response.metadata[0] if getattr(task_response, "metadata", None) else None
+						if not task_text.strip() and task_cid:
+							recovered = await fetch_readable_chat_response(gemini_client, task_cid, [2, 5, 10])
+							if recovered and getattr(recovered, "text", ""):
+								task_text = recovered.text
+						if task_cid:
+							task_attachments = await fetch_task_attachments(gemini_client, task_cid)
+							if task_attachments:
+								task_text = render_task_attachments(task_text, task_attachments, base_url)
+						if ENABLE_THINKING and task_thoughts:
+							yield make_chunk({"content": f"<think>\n{task_thoughts}\n</think>\n\n", "reasoning_content": task_thoughts})
+						if task_text:
+							yield make_chunk({"content": postprocess_text(task_text)})
+						yield make_chunk({}, finish_reason="stop")
+						yield "data: [DONE]\n\n"
+						logger.info("Task streaming completed via buffered response: cid=%s text_len=%s", task_cid, len(task_text))
+						if task_cid and not AUTO_DELETE_CHAT:
+							asyncio.create_task(background_verify_chat_persistence(gemini_client, task_cid, "stream"))
+						return
 
 					thinking_started = False
 					thinking_ended = False
