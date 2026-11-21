@@ -1,6 +1,6 @@
 [project]
 name = "gemi2api-server"
-version = "2.2.2"
+version = "2.2.3"
 license = "MIT"
 description = "Add your description here"
 readme = "README.md"
