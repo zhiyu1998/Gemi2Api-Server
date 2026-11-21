@@ -61,6 +61,9 @@ cases = {
 	"gemini-4-neon-thinking": (gm.HEX_NEON_4, 3, 2),
 	"gemini-4-neon-high": (gm.HEX_NEON_4, 3, 2),
 	"gemini-3.1-pro": (gm.HEX_PRO_31, 3, 1),
+	"gemini-4-hydrogen-task": (gm.HEX_HYDROGEN_4, 1, 1),
+	"gemini-4-carbon-task": (gm.HEX_ARGON_4, 8, 1),
+	"gemini-4-argon-task": (gm.HEX_ARGON_4, 8, 1),
 }
 for raw, expected in cases.items():
 	spec = gm.resolve_builtin(gm.normalize_model_name(raw))
@@ -132,6 +135,18 @@ check("inner[96]=0", inner[96] == 0)
 check("不补 inner[49]（档位 8 专属）", inner[49] is None)
 check("inner[68] 保留库值", inner[68] == 2)
 check("提示词保留", inner[0][0] == "hello")
+
+print("== f.req 改写：Task（featureMode 40）==")
+spec = gm.resolve_builtin("gemini-4-carbon-task")
+out = gw._rewrite_freq(_fake_freq(), spec)
+inner = json.loads(json.loads(out)[1])
+check("inner[49]=featureMode 40", inner[49] == 40)
+check("inner[83]=1", inner[83] == 1)
+check("inner[6]=[0]", inner[6] == [0])
+check("inner[68]=1", inner[68] == 1)
+check("inner[30]=Task 工具列表", inner[30] == [4, 27, 28, 16, 19, 12])
+check("inner[79]=mode 8", inner[79] == 8)
+check("inner[98]=1", inner[98] == 1)
 
 print("== f.req 改写：普通模型不动长度 ==")
 spec = gm.resolve_builtin("gemini-3.5-flash-lite")

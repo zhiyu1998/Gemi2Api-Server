@@ -171,6 +171,22 @@ def _apply_slots(inner: list, spec: ModelSpec) -> None:
 	if len(inner) > 96:
 		inner[96] = 1 if think != THINK_NORMAL else 0
 
+	# Task 模式（featureMode 40）：按官网抓包补输入框工具槽位。
+	# inner[49]=featureMode、inner[83]=1；inner[6]/[30]/[68]/[91]/[96]/[98] 用 Task 自己的值，
+	# 不能沿用 mode 8 防挂那套（会给 inner[6]=[1]、inner[68]=2，Task 下是错的）。
+	if spec.feature:
+		if len(inner) < _WIRE_MIN_SLOTS:
+			inner.extend([None] * (_WIRE_MIN_SLOTS - len(inner)))
+		inner[6] = [0]
+		inner[30] = [4, 27, 28, 16, 19, 12]
+		inner[49] = spec.feature
+		inner[68] = 1
+		inner[83] = 1
+		inner[91] = 0
+		inner[96] = 0
+		inner[98] = 1
+		return
+
 	if spec.mode != 8:
 		return
 

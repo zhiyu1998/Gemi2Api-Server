@@ -43,6 +43,7 @@ from cookie_pool import (
 )
 from gemini_models import (
 	BUILTIN_MODELS,
+	FEATURE_TASK,
 	TIER_SUFFIXES,
 	ModelSpec,
 	build_model_arg,
@@ -52,10 +53,7 @@ from gemini_models import (
 	resolve_builtin,
 	think_from_effort,
 )
-from gemini_wire import active_spec as active_model_spec
-from gemini_wire import install as install_wire_shim
-from gemini_wire import pop_spec as gemini_wire_pop_spec
-from gemini_wire import push_spec as gemini_wire_push_spec
+from gemini_task import ensure_task_ready
 from gemini_tools import (
 	TOOL_FENCE_CLOSE,
 	TOOL_FENCE_OPEN,
@@ -65,6 +63,10 @@ from gemini_tools import (
 	parse_tool_calls,
 	tool_calls_for_stream,
 )
+from gemini_wire import active_spec as active_model_spec
+from gemini_wire import install as install_wire_shim
+from gemini_wire import pop_spec as gemini_wire_pop_spec
+from gemini_wire import push_spec as gemini_wire_push_spec
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -764,6 +766,9 @@ def resolve_model_spec(requested_model: str) -> Optional[ModelSpec]:
 			tier = _tier_from_name(name, key)
 			if tier:
 				spec = spec.with_tier(tier, "")
+			if name.endswith("-task"):
+				# 自定义模型走 parse_header_spec 时拿不到 feature，名字以 -task 结尾就补上
+				spec = spec.with_feature(FEATURE_TASK)
 			return spec
 
 	return resolve_builtin(name) or fuzzy_builtin(name)
@@ -975,6 +980,8 @@ async def generate_with_cookie_pool(pool: CookiePool, conversation: str, gen_kwa
 		lease = await acquire_lease(pool, tried)
 		tried.add(lease.psid)
 		try:
+			if model_spec.feature:
+				await ensure_task_ready(lease.client)
 			with active_model_spec(model_spec):
 				response = await lease.client.generate_content(conversation, **gen_kwargs)
 			lease.succeed()
@@ -1184,7 +1191,8 @@ async def create_chat_completion(
 		# 模型以 dict 形式交给 gemini_webapi：hex / 档位写进模型头，
 		# 思考档与 4 系列专用槽位由 gemini_wire 在发请求前统一改写。
 		gen_kwargs = {"model": build_model_arg(model_spec)}
-		if TEMPORARY_CHAT:
+		if TEMPORARY_CHAT and not model_spec.feature:
+			# Task 只能用普通会话；临时会话会拿不到任务结果
 			gen_kwargs["temporary"] = True
 		if temp_files:
 			gen_kwargs["files"] = temp_files
@@ -1204,6 +1212,8 @@ async def create_chat_completion(
 				# 流式生成在 StreamingResponse 自己的任务里跑，模型规格必须在这里挂上
 				spec_token = gemini_wire_push_spec(model_spec)
 				stream_failed = False
+				if model_spec.feature:
+					await ensure_task_ready(gemini_client)
 				try:
 
 					def make_chunk(delta: dict, finish_reason=None):
@@ -1333,6 +1343,12 @@ async def create_chat_completion(
 					if thinking_started and not thinking_ended:
 						yield make_chunk({"content": "\n</think>\n\n"})
 
+					# Task 模式：流可能以「运行中」结束、正文稍后才写进会话，这里补读一次
+					if model_spec.feature and not full_text.strip() and last_metadata:
+						recovered = await fetch_readable_chat_response(gemini_client, last_metadata[0], [2, 5, 10])
+						if recovered and getattr(recovered, "text", ""):
+							yield make_chunk({"content": postprocess_text(recovered.text)})
+
 					# Send finish chunk（有工具调用时 finish_reason 必须是 tool_calls）
 					if stream_tool_calls:
 						yield make_chunk({"tool_calls": tool_calls_for_stream(stream_tool_calls)}, finish_reason="tool_calls")
@@ -1403,6 +1419,14 @@ async def create_chat_completion(
 			if ENABLE_THINKING and hasattr(response, "thoughts") and response.thoughts:
 				thoughts_text = f"<think>\n{response.thoughts}\n</think>\n\n"
 			raw_text = getattr(response, "text", None) or str(response)
+
+			# Task 模式：首轮可能只回「运行中」，正文稍后才会话里可见，补读一次
+			if model_spec.feature and not raw_text.strip():
+				task_cid = response.metadata[0] if getattr(response, "metadata", None) else None
+				if task_cid:
+					recovered = await fetch_readable_chat_response(gemini_client, task_cid, [2, 5, 10])
+					if recovered and getattr(recovered, "text", ""):
+						raw_text = recovered.text
 
 			# tools：把 ```tool_call``` 围栏解析成 OpenAI 的 tool_calls
 			tool_calls: List[Dict[str, Any]] = []

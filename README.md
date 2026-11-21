@@ -165,6 +165,7 @@ g.a000xxxxx,1PSIDTS的值,号4
 | 日常帮助 | `gemini-4-hydrogen` | 4 Hydrogen | `56fdd199312815e2` | 1 |
 | 深度研究 | `gemini-4-neon`（旧名 `gemini-3.1-pro`） | 4 Neon（Deeper analysis，接替 3.1 Pro） | `e6fa609c3fa255c0` / `9d8ca3786ebdfbea` | 3 |
 | 代码与分析 | `gemini-4-argon` | 4 Carbon（原 Argon） | `95a4c0abcba24364` | 8 |
+| 任务执行 | `gemini-4-hydrogen-task`、`gemini-4-carbon-task`、`gemini-4-argon-task` | Task（代为执行任务） | 同对应 Chat 模型 | 1 / 8 |
 
 思考档走 OpenAI 规范的 `reasoning_effort`，**不靠模型名后缀**，同一模型三档都可用：
 
@@ -189,6 +190,9 @@ curl https://your-host/v1/chat/completions \
 
 > [!NOTE]
 > 4 Neon 走的是档位 3（`inner[79]=3`），接替原来 3.1 Pro 的位置，模型列表里显示为「Deeper analysis」。2026-11-19 在 Ultra 号上实测：普通档回报 `4 Neon`，`reasoning_effort: "high"` 回报 `4 Neon High` 并带 `reasoning_content`；免费号发档位 3 会挂到超时，所以这条路由要付费 / Ultra 账号的 cookie。`gemini-3.1-pro` 不再是下线模型，它和 `gemini-4-neon` 是同一条路由的两个名字。Neon 不是 Argon 的继任者：Argon 改名成了 Carbon，Neon 是另一个模型。
+
+> [!NOTE]
+> Task 模型（`*-task`，官网「Task / 代为执行任务」）走 `featureMode 40`：请求写 `inner[49]=40`、`inner[83]=1`，并强制使用普通会话（不能临时会话）。首次使用前服务会自动写账号偏好 222、再发 `UVb0T` 条款（见 `gemini_task.py`）；长任务的回答可能先以「运行中」结束，服务会再从会话里读回正文。只有账号的 Task 菜单里出现对应模型时才真正生效。
 
 ## 使用 Docker 运行（推荐）
 

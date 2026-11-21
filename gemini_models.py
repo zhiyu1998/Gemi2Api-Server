@@ -44,6 +44,9 @@ THINK_NORMAL = 1
 THINK_EXTENDED = 2
 THINK_MEDIUM = 4
 
+#: 输入框工具 featureMode（inner[49]）：Task 模式为 40。
+FEATURE_TASK = 40
+
 #: 模型名后缀 → 思考档。空后缀取模型自身默认档。
 TIER_SUFFIXES: Dict[str, int] = {
 	"": 0,  # 用模型默认档
@@ -98,6 +101,9 @@ class ModelSpec:
 	hex_id: str
 	mode: int = 1
 	think: int = THINK_NORMAL
+	# Task 模式的 featureMode（40=Task）。非 0 时 wire 会写 inner[49]=feature 并补 Task 专属槽位，
+	# 且请求必须走普通（持久）会话，回答可能先以「运行中」结束、稍后从会话里读回。
+	feature: int = 0
 	capacity: int = 1
 	display: str = ""
 	description: str = ""
@@ -122,6 +128,23 @@ class ModelSpec:
 			hex_id=self.hex_id,
 			mode=self.mode,
 			think=think or self.think,
+			feature=self.feature,
+			capacity=self.capacity,
+			display=self.display,
+			description=self.description,
+			aliases=self.aliases,
+			needs_login=self.needs_login,
+			retired=self.retired,
+		)
+
+	def with_feature(self, feature: int) -> "ModelSpec":
+		"""返回同一路由但换了 featureMode 的副本（Task 用）。"""
+		return ModelSpec(
+			name=self.name,
+			hex_id=self.hex_id,
+			mode=self.mode,
+			think=self.think,
+			feature=feature,
 			capacity=self.capacity,
 			display=self.display,
 			description=self.description,
@@ -172,6 +195,42 @@ BUILTIN_MODELS: Dict[str, ModelSpec] = {
 		display="4 Neon",
 		description="4 Neon（Deeper analysis）：接替 3.1 Pro 的位置，付费/Ultra 号专属，免费号会挂到超时",
 		aliases=("neon", "4-neon", "gemini-4-deep"),
+		needs_login=True,
+	),
+	# Task 模式（featureMode 40）：官网「Task / 代为执行任务」，同一批 Chat 模型套 Task 外壳。
+	# 只有账号的 Task 菜单里出现对应模型时官网才会真的执行；免费号通常没有 Task 菜单。
+	# 必须走持久会话（不能 temporary），且需要先写偏好 222 + UVb0T 条款（见 gemini_task.py）。
+	"gemini-4-hydrogen-task": ModelSpec(
+		name="gemini-4-hydrogen-task",
+		hex_id=HEX_HYDROGEN_4,
+		mode=1,
+		feature=FEATURE_TASK,
+		capacity=2,
+		display="4 Hydrogen Task",
+		description="4 Hydrogen 的 Task 模式：代为执行任务，需登录且在官网 Task 菜单可见",
+		aliases=("hydrogen-task", "4-hydrogen-task"),
+		needs_login=True,
+	),
+	"gemini-4-carbon-task": ModelSpec(
+		name="gemini-4-carbon-task",
+		hex_id=HEX_ARGON_4,
+		mode=8,
+		feature=FEATURE_TASK,
+		capacity=2,
+		display="4 Carbon Task",
+		description="4 Carbon 的 Task 模式：代为执行复杂任务，付费/Ultra 号专属",
+		aliases=("carbon-task", "4-carbon-task"),
+		needs_login=True,
+	),
+	"gemini-4-argon-task": ModelSpec(
+		name="gemini-4-argon-task",
+		hex_id=HEX_ARGON_4,
+		mode=8,
+		feature=FEATURE_TASK,
+		capacity=2,
+		display="4 Argon Task",
+		description="4 Argon（4 Carbon）的 Task 模式旧名，跟 gemini-4-carbon-task 同一条路由",
+		aliases=("argon-task", "4-argon-task"),
 		needs_login=True,
 	),
 	# --- 3.x 保留（老配置还在用） -------------------------------------------
