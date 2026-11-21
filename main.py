@@ -715,6 +715,9 @@ class ContentItem(BaseModel):
 	type: str
 	text: Optional[str] = None
 	image_url: Optional[Dict[str, str]] = None
+	file: Optional[Dict[str, Any]] = None
+	input_file: Optional[Dict[str, Any]] = None
+	document: Optional[Dict[str, Any]] = None
 
 
 class Message(BaseModel):
@@ -1044,6 +1047,27 @@ def _message_content_to_text(content: Union[str, List[ContentItem], None], temp_
 						images.append(tmp.name)
 				except Exception as e:
 					logger.error(f"Error processing base64 image: {str(e)}")
+		elif item.type in ("file", "input_file", "document"):
+			# OpenAI / 客户端常见的文件内容块：{"type":"file","file":{"filename","file_data"}}
+			blob = item.file or item.input_file or item.document or {}
+			name = str(blob.get("filename") or blob.get("name") or "attachment")
+			data_url = blob.get("file_data") or blob.get("data") or blob.get("content") or ""
+			if isinstance(data_url, str) and data_url.startswith("data:") and "," in data_url:
+				try:
+					header, payload = data_url.split(",", 1)
+					suffix = ".bin"
+					if "/" in header:
+						import mimetypes
+
+						suffix = mimetypes.guess_extension(header.split(";")[0].split("/")[-1]) or Path(name).suffix or ".bin"
+					with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+						tmp.write(base64.b64decode(payload))
+						images.append(tmp.name)
+					text_bits.append(f"[附件：{name}]")
+				except Exception as e:
+					logger.error(f"Error processing file attachment: {str(e)}")
+			else:
+				text_bits.append(f"[附件：{name}（客户端未传文件内容，仅文件名）]")
 	return "\n".join(text_bits), images
 
 
@@ -1062,6 +1086,18 @@ def _tool_calls_to_fences(tool_calls: Optional[List[Dict[str, Any]]]) -> str:
 		arguments = function.get("arguments") or "{}"
 		fences.append(f'{TOOL_FENCE_OPEN}\n{{"name": "{name}", "arguments": {arguments}}}\n{TOOL_FENCE_CLOSE}')
 	return "\n".join(fences)
+
+
+async def _iter_stream_with_heartbeat(stream, interval: float = 15.0):
+	"""给长时间没有输出的上游流补 SSE 心跳，避免客户端/反代把连接判超时。"""
+	iterator = stream.__aiter__()
+	while True:
+		try:
+			yield await asyncio.wait_for(iterator.__anext__(), timeout=interval)
+		except StopAsyncIteration:
+			return
+		except asyncio.TimeoutError:
+			yield None
 
 
 async def get_gemini_pool() -> CookiePool:
@@ -1391,7 +1427,10 @@ async def create_chat_completion(
 					chunk_count = 0
 					last_metadata = None
 
-					async for chunk in gemini_client.generate_content_stream(conversation, **gen_kwargs):
+					async for chunk in _iter_stream_with_heartbeat(gemini_client.generate_content_stream(conversation, **gen_kwargs)):
+						if chunk is None:
+							yield ": keepalive\n\n"
+							continue
 						chunk_count += 1
 						if hasattr(chunk, "metadata") and chunk.metadata:
 							last_metadata = chunk.metadata
