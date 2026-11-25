@@ -36,11 +36,11 @@ API_KEY= "API_KEY VALUE HERE"
 TEMPORARY_CHAT = "false" # 使用临时对话模式，此模式会禁用部分功能如思考、图片生成等，默认关闭。
 AUTO_DELETE_CHAT = "true" # 生成结束后自动从web端删除对话记录，默认开启。TEMPORARY_CHAT为true时，此项无效。
 PUBLIC_BASE_URL = "https://your-domain.com" # 外部URL，用于生成图片代理链接，不填则会使用内部地址。使用反向代理时必填，否则可能导致图片无法访问。
-CUSTOM_MODELS_FILE = "custom_models.yaml" # 可选。用于覆写/新增 Gemini 模型定义，支持 YAML/JSON。
-DISABLE_BUILTIN_MODELS = "true" # 可选。设为 true 时，/v1/models 仅返回 CUSTOM_MODELS(_FILE) 中定义的模型，不再追加 gemini_webapi 内置模型（仓库自带配置用 true，对外只有 5 条路由）。此开关在服务启动时读取，修改 .env 后需重启生效（区别于 CUSTOM_MODELS_FILE 的免重启热加载）；也可在管理面板「功能开关」中切换，即时生效并写回 .env。
+CUSTOM_MODELS_FILE = "" # 可选，默认留空（只用内置模型）。如需覆写/新增 Gemini 模型定义（YAML/JSON），指向自己的文件；custom_models.yaml 已被 .gitignore 忽略，仓库不附带，文件不存在时服务仅告警并跳过。
+DISABLE_BUILTIN_MODELS = "false" # 可选，默认 false。设为 true 时，/v1/models 仅返回 CUSTOM_MODELS(_FILE) 中定义的模型，不再追加 gemini_webapi 内置模型（未配置自定义模型则返回空列表）。此开关在服务启动时读取，修改 .env 后需重启生效（区别于 CUSTOM_MODELS_FILE 的免重启热加载）；也可在管理面板「功能开关」中切换，即时生效并写回 .env。
 ```
 
-`custom_models.yaml` 示例（仓库自带这份，配合 `DISABLE_BUILTIN_MODELS="true"` 对外只暴露这 5 条）：
+`custom_models.yaml` 示例（本地自建该文件并用 `CUSTOM_MODELS_FILE` 指向它即可；该文件已被 .gitignore 忽略，仓库不附带）：
 
 ```yaml
 models:
@@ -184,7 +184,7 @@ curl http://127.0.0.1:8001/v1beta/models/gemini-4-hydrogen:generateContent -H "A
 
 ## 模型与思考档
 
-`/v1/models` 返回的就是 `custom_models.yaml` 里这几条（配 `DISABLE_BUILTIN_MODELS="true"` 时不再追加内置模型）：
+内置模型目录（`gemini_models.py`）已覆盖下表这些路由，`/v1/models` 默认返回：
 
 | 用途 | 模型名 | 上游 | hex | 档位 |
 | --- | --- | --- | --- | --- |

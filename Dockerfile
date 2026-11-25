@@ -7,8 +7,7 @@ COPY pyproject.toml .
 RUN uv sync
 
 # Copy application code
-COPY main.py .
-COPY admin.py .
+COPY *.py .
 COPY templates/ templates/
 COPY assets/ assets/
 

@@ -291,6 +291,9 @@ def normalize_custom_model_specs(raw_config) -> List[Dict[str, Dict[str, str]]]:
 	return normalized_models
 
 
+_CUSTOM_MODELS_MISSING_WARNED = set()
+
+
 def load_custom_models() -> Dict[str, Dict[str, Dict[str, str]]]:
 	"""Load custom model overrides from file/env on demand."""
 	registry = {}
@@ -302,10 +305,14 @@ def load_custom_models() -> Dict[str, Dict[str, Dict[str, str]]]:
 		if not config_path.is_absolute():
 			config_path = Path(__file__).parent / config_path
 		if not config_path.exists():
-			raise ValueError(f"CUSTOM_MODELS_FILE does not exist: {config_path}")
-		file_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-		for model in normalize_custom_model_specs(file_config):
-			registry[model["model_name"].lower()] = model
+			missing_key = str(config_path)
+			if missing_key not in _CUSTOM_MODELS_MISSING_WARNED:
+				_CUSTOM_MODELS_MISSING_WARNED.add(missing_key)
+				logger.warning(f"CUSTOM_MODELS_FILE not found, skipping custom models: {config_path}")
+		else:
+			file_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+			for model in normalize_custom_model_specs(file_config):
+				registry[model["model_name"].lower()] = model
 
 	if custom_models:
 		inline_config = yaml.safe_load(custom_models)

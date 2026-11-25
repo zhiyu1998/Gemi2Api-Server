@@ -8,6 +8,12 @@ services:
     volumes:
       - ./main.py:/app/main.py
       - ./admin.py:/app/admin.py
+      - ./cookie_pool.py:/app/cookie_pool.py
+      - ./gemini_models.py:/app/gemini_models.py
+      - ./gemini_task.py:/app/gemini_task.py
+      - ./gemini_tools.py:/app/gemini_tools.py
+      - ./gemini_wire.py:/app/gemini_wire.py
+      - ./protocols.py:/app/protocols.py
       - ./templates:/app/templates
       - ./pyproject.toml:/app/pyproject.toml
       - ./secrets:/app/secrets
